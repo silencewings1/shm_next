@@ -4,7 +4,6 @@
 #include <pthread.h>
 #include <system_error>
 #include <errno.h>
-#include <time.h>
 
 namespace interprocess
 {

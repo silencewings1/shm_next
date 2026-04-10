@@ -3,12 +3,8 @@
 #include "offset_ptr.h"
 #include "shared_memory_allocator.h"
 #include <cstddef>
-#include <cstring>
-#include <memory>
-#include <algorithm>
 #include <ostream>
 #include <string>
-#include <utility>
 
 namespace interprocess
 {

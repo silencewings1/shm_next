@@ -1,7 +1,6 @@
 #include "../interprocess/ipc/managed_shared_memory.h"
 #include "../interprocess/allocator/shared_memory_string.h"
 #include <iostream>
-#include <string>
 
 using namespace interprocess;
 

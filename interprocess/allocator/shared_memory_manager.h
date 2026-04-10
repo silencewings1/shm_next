@@ -9,6 +9,7 @@
 #include <cassert>
 #include <cstring>
 #include <mutex>
+#include <utility>
 
 namespace interprocess
 {

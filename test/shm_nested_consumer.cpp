@@ -1,7 +1,6 @@
 #include "../interprocess/ipc/managed_shared_memory.h"
 #include "../interprocess/allocator/shared_memory_string.h"
 #include "../interprocess/allocator/shared_memory_vector.h"
-#include <cassert>
 #include <iostream>
 
 using namespace interprocess;

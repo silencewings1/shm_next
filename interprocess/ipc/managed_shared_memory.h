@@ -1,12 +1,12 @@
 #pragma once
 
-#include "posix_shared_memory_object.h"
-#include "posix_mapped_region.h"
 #include "../allocator/shared_memory_manager.h"
 #include "../allocator/shared_memory_allocator.h"
-#include <string>
-#include <memory>
+#include "posix_mapped_region.h"
+#include "posix_shared_memory_object.h"
 #include <cstring>
+#include <sys/stat.h>
+#include <utility>
 
 namespace interprocess
 {

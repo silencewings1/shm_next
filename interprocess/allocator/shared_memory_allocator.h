@@ -1,9 +1,10 @@
 #pragma once
 
-#include "shared_memory_manager.h"
 #include "offset_ptr.h"
-#include <memory>
-#include <type_traits>
+#include "shared_memory_manager.h"
+#include <cstddef>
+#include <new>
+#include <utility>
 
 namespace interprocess
 {

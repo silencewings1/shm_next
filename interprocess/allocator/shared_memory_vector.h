@@ -3,9 +3,6 @@
 #include "offset_ptr.h"
 #include "shared_memory_allocator.h"
 #include <cstddef>
-#include <memory>
-#include <algorithm>
-#include <iterator>
 #include <utility>
 
 namespace interprocess

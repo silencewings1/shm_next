@@ -1,10 +1,12 @@
 #pragma once
 
+#include "posix_shared_memory_object.h"
 #include <sys/mman.h>
 #include <unistd.h>
-#include <system_error>
-#include <stdexcept>
 #include <cstddef>
+#include <errno.h>
+#include <stdexcept>
+#include <system_error>
 #include <utility>
 
 namespace interprocess

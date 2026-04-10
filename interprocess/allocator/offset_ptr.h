@@ -3,7 +3,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
-#include <iostream>
 
 namespace interprocess
 {
