@@ -1,7 +1,7 @@
 #pragma once
 
-#include "offset_ptr.h"
-#include "shared_memory_allocator.h"
+#include "../allocator/offset_ptr.h"
+#include "../allocator/shared_memory_allocator.h"
 #include <cstddef>
 #include <ostream>
 #include <string>
@@ -248,6 +248,23 @@ public:
     bool operator==(const std::basic_string<CharT, Traits>& s) const
     {
         return size() == s.size() && Traits::compare(c_str(), s.data(), s.size()) == 0;
+    }
+
+    bool operator<(const BasicSharedMemoryString& other) const
+    {
+        const size_type lhs_size = size();
+        const size_type rhs_size = other.size();
+        const size_type compare_size = lhs_size < rhs_size ? lhs_size : rhs_size;
+        const int compare_result = Traits::compare(data(), other.data(), compare_size);
+        if (compare_result < 0)
+        {
+            return true;
+        }
+        if (compare_result > 0)
+        {
+            return false;
+        }
+        return lhs_size < rhs_size;
     }
 
     friend std::ostream& operator<<(std::ostream& os, const BasicSharedMemoryString& s)

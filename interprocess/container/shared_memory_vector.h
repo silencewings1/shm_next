@@ -1,7 +1,7 @@
 #pragma once
 
-#include "offset_ptr.h"
-#include "shared_memory_allocator.h"
+#include "../allocator/offset_ptr.h"
+#include "../allocator/shared_memory_allocator.h"
 #include <cstddef>
 #include <utility>
 
