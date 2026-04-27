@@ -12,7 +12,7 @@
 namespace interprocess
 {
 
-enum map_options_t
+enum class map_options_t
 {
     default_map_options = 0
 };
@@ -23,16 +23,17 @@ public:
     MappedRegion(const MappedRegion&) = delete;
     MappedRegion& operator=(const MappedRegion&) = delete;
 
-    MappedRegion() noexcept : base(nullptr), size(0), page_offset(0), mode(read_only)
+    MappedRegion() noexcept : base(nullptr), size(0), page_offset(0), mode(mode_t::read_only)
     {
     }
 
     template <class MemoryMappable>
     MappedRegion(const MemoryMappable& mapping, mode_t open_mode, std::size_t offset = 0,
                  std::size_t mapping_size = 0, const void* address = nullptr,
-                 map_options_t map_options = default_map_options)
+                 map_options_t map_options = map_options_t::default_map_options)
         : base(nullptr), size(0), page_offset(0), mode(open_mode)
     {
+        (void)map_options;
 
         int fd = mapping.get_fd();
         if (fd == -1)
@@ -57,11 +58,11 @@ public:
         int prot = 0;
         int flags = MAP_SHARED;
 
-        if (open_mode == read_only)
+        if (open_mode == mode_t::read_only)
         {
             prot |= PROT_READ;
         }
-        else if (open_mode == read_write)
+        else if (open_mode == mode_t::read_write)
         {
             prot |= (PROT_READ | PROT_WRITE);
         }
@@ -89,7 +90,7 @@ public:
         other.base = nullptr;
         other.size = 0;
         other.page_offset = 0;
-        other.mode = read_only;
+        other.mode = mode_t::read_only;
     }
 
     MappedRegion& operator=(MappedRegion&& other) noexcept
@@ -105,7 +106,7 @@ public:
             other.base = nullptr;
             other.size = 0;
             other.page_offset = 0;
-            other.mode = read_only;
+            other.mode = mode_t::read_only;
         }
         return *this;
     }
@@ -145,8 +146,11 @@ public:
         if (numbytes > size - mapping_offset)
             return false;
 
-        void* addr = static_cast<char*>(priv_map_address()) + mapping_offset;
-        numbytes += page_offset;
+        const std::size_t page_size = get_page_size();
+        const std::size_t flush_begin = page_offset + mapping_offset;
+        const std::size_t flush_page_offset = flush_begin % page_size;
+        void* addr = static_cast<char*>(priv_map_address()) + flush_begin - flush_page_offset;
+        numbytes += flush_page_offset;
 
         int flags = async ? MS_ASYNC : MS_SYNC;
         return msync(addr, numbytes, flags) == 0;

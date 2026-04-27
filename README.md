@@ -1,4 +1,4 @@
-# interprocess
+# shm_next
 
 `interprocess/` 提供了一套基于 POSIX shared memory 的轻量级跨进程数据共享组件。它的目标不是完整复刻 Boost.Interprocess，而是在当前工程中提供一组可直接使用的共享内存对象管理、分配器、容器和同步原语。
 
@@ -69,6 +69,119 @@
 
 ## 核心设计
 
+## 流程图
+
+### 1. 模块关系图
+
+下面这张图描述了 `interprocess/` 内各层之间的依赖关系：
+
+```mermaid
+flowchart TD
+    A["业务代码 / 测试程序"] --> B["ipc/managed_shared_memory.h<br/>ManagedSharedMemory"]
+    B --> C["ipc/posix_shared_memory_object.h<br/>SharedMemoryObject"]
+    B --> D["ipc/posix_mapped_region.h<br/>MappedRegion"]
+    B --> E["allocator/shared_memory_manager.h<br/>SharedMemoryManager"]
+    B --> F["allocator/shared_memory_allocator.h<br/>SharedMemoryAllocator<T>"]
+
+    G["container/shared_memory_string.h<br/>SharedMemoryString"] --> F
+    H["container/shared_memory_vector.h<br/>SharedMemoryVector<T>"] --> F
+    I["container/shared_memory_map.h<br/>SharedMemoryMap<K,V>"] --> F
+
+    E --> J["allocator/offset_ptr.h<br/>OffsetPtr<T>"]
+    G --> J
+    H --> J
+    I --> J
+
+    K["sync/posix_mutex.h<br/>InterprocessMutex"] --> L["pthread process-shared primitives"]
+    M["sync/posix_condition.h<br/>InterprocessCondition"] --> L
+    N["sync/posix_semaphore.h<br/>InterprocessSemaphore"] --> L
+
+    C --> O["POSIX shared memory"]
+    D --> P["mmap / munmap"]
+```
+
+### 2. 共享内存创建与访问流程
+
+下面这张图对应最典型的 producer / consumer 用法：
+
+```mermaid
+sequenceDiagram
+    participant Producer
+    participant ManagedSHM as ManagedSharedMemory
+    participant ShmObj as SharedMemoryObject
+    participant Region as MappedRegion
+    participant Manager as SharedMemoryManager
+    participant Consumer
+
+    Producer->>ManagedSHM: create_only(name, size)
+    ManagedSHM->>ShmObj: shm_open + ftruncate
+    ManagedSHM->>Region: mmap
+    ManagedSHM->>Manager: create(base_addr, total_size)
+    Producer->>ManagedSHM: get_allocator<T>()
+    Producer->>ManagedSHM: construct<RootObject>("RootObject", ...)
+    ManagedSHM->>Manager: construct(name, ...)
+    Manager-->>Producer: RootObject*
+
+    Consumer->>ManagedSHM: open_only(name)
+    ManagedSHM->>ShmObj: shm_open
+    ManagedSHM->>Region: mmap
+    ManagedSHM->>Manager: attach(base_addr)
+    Consumer->>ManagedSHM: find<RootObject>("RootObject")
+    ManagedSHM->>Manager: find(name)
+    Manager-->>Consumer: RootObject*
+```
+
+### 3. 共享对象内部的数据流
+
+下面这张图描述共享内存中对象和容器的典型关系：
+
+```mermaid
+flowchart LR
+    A["Shared memory segment"] --> B["SharedMemoryManager"]
+    A --> C["Named object table"]
+    C --> D["RootObject"]
+
+    D --> E["InterprocessMutex"]
+    D --> F["SharedMemoryString"]
+    D --> G["SharedMemoryVector<T>"]
+    D --> H["SharedMemoryMap<Key, Value>"]
+
+    F --> I["char buffer in shared memory"]
+    G --> J["element buffer in shared memory"]
+    H --> K["RB-tree nodes in shared memory"]
+
+    B --> I
+    B --> J
+    B --> K
+
+    I -. offset .-> L["OffsetPtr"]
+    J -. offset .-> L
+    K -. offset .-> L
+```
+
+### 4. 带锁访问共享容器的建议流程
+
+当前容器本身不持锁，推荐由调用方在共享根对象上持有一个 `InterprocessMutex`：
+
+```mermaid
+sequenceDiagram
+    participant P1 as Process A
+    participant M as InterprocessMutex
+    participant Root as RootObject
+    participant Map as SharedMemoryMap / Vector / String
+    participant P2 as Process B
+
+    P1->>M: lock()
+    P1->>Root: 访问共享根对象
+    P1->>Map: insert / erase / find / assign
+    P1->>M: unlock()
+
+    P2->>M: lock()
+    P2->>Root: 读取或更新共享数据
+    P2->>Map: find / iterate / modify
+    P2->>M: unlock()
+```
+
 ### 1. 为什么使用 `OffsetPtr`
 
 共享内存中的普通裸指针在不同进程里通常不可直接复用，因为映射基地址可能不同。  
@@ -138,6 +251,7 @@ RootObject* root = segment.find<RootObject>("RootObject");
 - `shm_vector_producer.cpp` / `shm_vector_consumer.cpp`
 - `shm_nested_producer.cpp` / `shm_nested_consumer.cpp`
 - `shm_map_producer.cpp` / `shm_map_consumer.cpp`
+- `shm_open_or_create.cpp`
 - `shm_semaphore.cpp`
 
 其中：
@@ -146,6 +260,7 @@ RootObject* root = segment.find<RootObject>("RootObject");
 - `vector` 示例展示共享容器和显式加锁
 - `nested` 示例展示容器嵌套容器
 - `map` 示例展示有序键值存储和较复杂的业务结构
+- `open_or_create` 示例验证首次创建会初始化段，再次打开会复用已有对象
 
 ## 使用约束与注意事项
 
@@ -154,7 +269,7 @@ RootObject* root = segment.find<RootObject>("RootObject");
   - 或纯 POD / 标量类型
 - 不要在共享对象内部保存普通裸指针、`std::string`、`std::vector` 等进程私有内存对象。
 - 多进程并发读写共享对象时，必须由调用方保证同步。
-- `open_or_create` 目前实现偏简化，生产级场景下仍需要更严格的初始化竞争控制。
+- `open_or_create` 已区分首次创建和打开已有段；极端崩溃恢复场景仍建议由业务层做清理或重建策略。
 
 ## 一句话总结
 

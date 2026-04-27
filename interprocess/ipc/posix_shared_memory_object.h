@@ -28,7 +28,7 @@ constexpr create_only_t create_only{};
 constexpr open_only_t open_only{};
 constexpr open_or_create_t open_or_create{};
 
-enum mode_t
+enum class mode_t
 {
     read_only = O_RDONLY,
     read_write = O_RDWR
@@ -40,15 +40,16 @@ public:
     SharedMemoryObject(const SharedMemoryObject&) = delete;
     SharedMemoryObject& operator=(const SharedMemoryObject&) = delete;
 
-    SharedMemoryObject() noexcept : fd(-1), mode(read_only)
+    SharedMemoryObject() noexcept : fd(-1), mode(mode_t::read_only), created(false)
     {
     }
 
     SharedMemoryObject(SharedMemoryObject&& other) noexcept
-        : fd(other.fd), name(std::move(other.name)), mode(other.mode)
+        : fd(other.fd), name(std::move(other.name)), mode(other.mode), created(other.created)
     {
         other.fd = -1;
-        other.mode = read_only;
+        other.mode = mode_t::read_only;
+        other.created = false;
     }
 
     SharedMemoryObject& operator=(SharedMemoryObject&& other) noexcept
@@ -59,8 +60,10 @@ public:
             fd = other.fd;
             name = std::move(other.name);
             mode = other.mode;
+            created = other.created;
             other.fd = -1;
-            other.mode = read_only;
+            other.mode = mode_t::read_only;
+            other.created = false;
         }
         return *this;
     }
@@ -68,7 +71,7 @@ public:
     SharedMemoryObject(create_only_t, const char* shared_memory_name, mode_t open_mode,
                        ::mode_t permissions)
     {
-        priv_open_or_create(O_CREAT | O_EXCL, shared_memory_name, open_mode, permissions);
+        priv_open_or_create(O_CREAT | O_EXCL, shared_memory_name, open_mode, permissions, true);
         if (fd == -1)
         {
             throw std::system_error(errno, std::system_category(),
@@ -81,32 +84,33 @@ public:
     {
         while (true)
         {
-            priv_open_or_create(O_CREAT | O_EXCL, shared_memory_name, open_mode, permissions);
+            priv_open_or_create(O_CREAT | O_EXCL, shared_memory_name, open_mode, permissions, true);
             if (fd != -1)
             {
                 break;
             }
-            int current_errno = errno;
-            if (current_errno == EEXIST)
+            int last_errno = errno;
+            if (last_errno == EEXIST)
             {
-                priv_open_or_create(0, shared_memory_name, open_mode, permissions);
+                priv_open_or_create(0, shared_memory_name, open_mode, permissions, false);
                 if (fd != -1)
                 {
                     break;
                 }
+                last_errno = errno;
                 if (errno == ENOENT)
                 {
                     continue;
                 }
             }
-            throw std::system_error(current_errno, std::system_category(),
+            throw std::system_error(last_errno, std::system_category(),
                                     "Failed to open or create shared memory object");
         }
     }
 
     SharedMemoryObject(open_only_t, const char* shared_memory_name, mode_t open_mode)
     {
-        priv_open_or_create(0, shared_memory_name, open_mode, 0);
+        priv_open_or_create(0, shared_memory_name, open_mode, 0, false);
         if (fd == -1)
         {
             throw std::system_error(errno, std::system_category(),
@@ -149,6 +153,11 @@ public:
         return fd;
     }
 
+    bool was_created() const noexcept
+    {
+        return created;
+    }
+
     std::size_t get_size() const
     {
         if (fd == -1)
@@ -169,20 +178,22 @@ public:
         std::swap(fd, other.fd);
         std::swap(name, other.name);
         std::swap(mode, other.mode);
+        std::swap(created, other.created);
     }
 
 private:
     void priv_open_or_create(int flags, const char* shared_memory_name, mode_t open_mode,
-                             ::mode_t permissions)
+                             ::mode_t permissions, bool created_on_success)
     {
         std::string shm_name = "/";
         shm_name += shared_memory_name;
-        int oflag = open_mode | flags;
+        int oflag = static_cast<int>(open_mode) | flags;
         fd = shm_open(shm_name.c_str(), oflag, permissions);
         if (fd != -1)
         {
             name = shared_memory_name;
             mode = open_mode;
+            created = created_on_success;
         }
     }
 
@@ -195,9 +206,11 @@ private:
         }
     }
 
+private:
     int fd;
     std::string name;
     mode_t mode;
+    bool created;
 };
 
 } // namespace interprocess

@@ -270,7 +270,7 @@ private:
     OffsetPtr<NamedObjectHeader> named_objects_head;
 
     SharedMemoryManager(std::size_t total_size)
-        : magic(MAGIC), total_size(total_size), named_objects_head(nullptr)
+        : magic(0), total_size(total_size), named_objects_head(nullptr)
     {
         std::size_t header_size = (sizeof(SharedMemoryManager) + 15) & ~15;
         BlockHeader* first_block =
@@ -281,6 +281,7 @@ private:
         first_block->next_free = nullptr;
 
         free_list_head = first_block;
+        magic = MAGIC;
     }
 
     void* allocate_unlocked(std::size_t size)

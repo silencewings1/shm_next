@@ -2,7 +2,6 @@
 
 #include <pthread.h>
 #include <system_error>
-#include <errno.h>
 
 namespace interprocess
 {
@@ -16,20 +15,20 @@ public:
     InterprocessMutex()
     {
         pthread_mutexattr_t attr;
-        if (pthread_mutexattr_init(&attr) != 0)
+        int res = pthread_mutexattr_init(&attr);
+        if (res != 0)
         {
-            throw std::system_error(errno, std::system_category(),
-                                    "Failed to init mutex attributes");
+            throw std::system_error(res, std::system_category(), "Failed to init mutex attributes");
         }
 
-        if (pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED) != 0)
+        res = pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+        if (res != 0)
         {
             pthread_mutexattr_destroy(&attr);
-            throw std::system_error(errno, std::system_category(),
-                                    "Failed to set pshared attribute");
+            throw std::system_error(res, std::system_category(), "Failed to set pshared attribute");
         }
 
-        int res = pthread_mutex_init(&mutex, &attr);
+        res = pthread_mutex_init(&mutex, &attr);
         pthread_mutexattr_destroy(&attr);
 
         if (res != 0)
