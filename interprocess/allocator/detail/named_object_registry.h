@@ -35,7 +35,7 @@ class NamedObjectRegistry
 public:
     static constexpr std::size_t bucket_count = 64;
 
-    NamedObjectRegistry() noexcept : buckets(), ready_count(0), total_count(0)
+    NamedObjectRegistry() noexcept : buckets(), ready_count(0), total_count(0), reserved_count(0)
     {
     }
 
@@ -47,6 +47,7 @@ public:
         }
         ready_count = 0;
         total_count = 0;
+        reserved_count = 0;
     }
 
     static uint64_t hash_name(const char* name, std::size_t length) noexcept
@@ -181,6 +182,24 @@ public:
         return total_count;
     }
 
+    void reserve(std::size_t count) noexcept
+    {
+        if (count > reserved_count)
+        {
+            reserved_count = count;
+        }
+    }
+
+    void shrink_to_fit() noexcept
+    {
+        reserved_count = total_count;
+    }
+
+    std::size_t reserved_size() const noexcept
+    {
+        return reserved_count;
+    }
+
     template <typename Func>
     void for_each(Func&& func) const
     {
@@ -222,6 +241,7 @@ private:
     OffsetPtr<NamedObjectHeader> buckets[bucket_count];
     std::size_t ready_count;
     std::size_t total_count;
+    std::size_t reserved_count;
 };
 
 } // namespace interprocess::detail

@@ -368,6 +368,21 @@ public:
         return with_manager_lock([&] { return named_objects.total_size(); });
     }
 
+    std::size_t get_reserved_named_objects() const
+    {
+        return with_manager_lock([&] { return named_objects.reserved_size(); });
+    }
+
+    void reserve_named_objects(std::size_t count)
+    {
+        with_manager_lock([&] { named_objects.reserve(count); });
+    }
+
+    void shrink_to_fit_indexes()
+    {
+        with_manager_lock([&] { named_objects.shrink_to_fit(); });
+    }
+
     template <typename Func>
     void for_each_named_object(Func&& func) const
     {
@@ -378,6 +393,17 @@ public:
                     func(header.name.get(), header.ptr.get(), header.instance_count);
                 }
             });
+        });
+    }
+
+    template <typename Func>
+    void for_each_named_object_read_only(Func&& func) const
+    {
+        named_objects.for_each([&](const detail::NamedObjectHeader& header) {
+            if (header.state == detail::NamedObjectState::ready)
+            {
+                func(header.name.get(), header.ptr.get(), header.instance_count);
+            }
         });
     }
 
@@ -408,6 +434,11 @@ public:
         return with_manager_lock([&] { return block_allocator.get_free_memory(); });
     }
 
+    std::size_t get_size() const noexcept
+    {
+        return total_size;
+    }
+
     bool owns(const void* ptr) const
     {
         return with_manager_lock([&] { return block_allocator.owns(ptr); });
@@ -431,6 +462,79 @@ public:
     void zero_free_memory()
     {
         with_manager_lock([&] { block_allocator.zero_free_memory(); });
+    }
+
+    bool grow_to_size(std::size_t new_total_size)
+    {
+        return with_manager_lock([&] {
+            if (new_total_size <= total_size)
+            {
+                return false;
+            }
+            bool changed = block_allocator.grow(new_total_size);
+            if (changed)
+            {
+                total_size = new_total_size;
+            }
+            return changed;
+        });
+    }
+
+    std::size_t shrink_to_fit()
+    {
+        return with_manager_lock([&] {
+            std::size_t new_total_size = block_allocator.shrink_to_fit();
+            total_size = new_total_size;
+            return new_total_size;
+        });
+    }
+
+    template <typename T>
+    const T* find_read_only(const char* name) const
+    {
+        std::size_t name_length = validate_name(name);
+        detail::NamedObjectHeader* curr = named_objects.find_ready(name, name_length);
+        return curr ? static_cast<const T*>(curr->ptr.get()) : nullptr;
+    }
+
+    template <typename T>
+    const T* find_array_read_only(const char* name, std::size_t* count = nullptr) const
+    {
+        std::size_t name_length = validate_name(name);
+        detail::NamedObjectHeader* curr = named_objects.find_ready(name, name_length);
+        if (curr == nullptr)
+        {
+            if (count != nullptr)
+            {
+                *count = 0;
+            }
+            return nullptr;
+        }
+        if (count != nullptr)
+        {
+            *count = curr->instance_count;
+        }
+        return static_cast<const T*>(curr->ptr.get());
+    }
+
+    std::size_t get_num_named_objects_read_only() const
+    {
+        return named_objects.ready_size();
+    }
+
+    std::size_t get_num_total_named_objects_read_only() const
+    {
+        return named_objects.total_size();
+    }
+
+    std::size_t get_reserved_named_objects_read_only() const
+    {
+        return named_objects.reserved_size();
+    }
+
+    std::size_t get_free_memory_read_only() const
+    {
+        return block_allocator.get_free_memory();
     }
 
 private:

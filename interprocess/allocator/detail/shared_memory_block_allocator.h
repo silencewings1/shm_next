@@ -170,6 +170,74 @@ public:
         return true;
     }
 
+    bool grow(std::size_t new_segment_size) noexcept
+    {
+        new_segment_size = align_down(new_segment_size);
+        if (new_segment_size <= segment_size)
+        {
+            return false;
+        }
+
+        const std::size_t old_segment_size = segment_size;
+        const uintptr_t old_segment_end = segment_end_address();
+        const std::size_t extra_size = new_segment_size - old_segment_size;
+        segment_size = new_segment_size;
+
+        BlockHeader* tail = physical_previous(reinterpret_cast<BlockHeader*>(old_segment_end));
+        if (tail != nullptr && tail->is_free)
+        {
+            remove_free_block(tail);
+            tail->size += extra_size;
+            insert_free_block(tail);
+            return true;
+        }
+
+        if (extra_size < sizeof(BlockHeader) + alignment)
+        {
+            segment_size = old_segment_size;
+            return false;
+        }
+
+        BlockHeader* new_block = reinterpret_cast<BlockHeader*>(old_segment_end);
+        new_block->size = extra_size;
+        new_block->is_free = true;
+        new_block->next_free = nullptr;
+        insert_free_block(new_block);
+        return true;
+    }
+
+    std::size_t shrink_to_fit() noexcept
+    {
+        BlockHeader* last = last_block();
+        if (last == nullptr || !last->is_free)
+        {
+            return segment_size;
+        }
+
+        const std::size_t minimum_free_block_size = sizeof(BlockHeader) + alignment;
+        uintptr_t block_begin = reinterpret_cast<uintptr_t>(last);
+        std::size_t keep_size = last == first_block.get() ? minimum_free_block_size : 0;
+        if (last->size <= keep_size)
+        {
+            return segment_size;
+        }
+
+        remove_free_block(last);
+        std::size_t new_segment_size =
+            static_cast<std::size_t>(block_begin - segment_begin_address()) + keep_size;
+
+        if (keep_size != 0)
+        {
+            last->size = keep_size;
+            last->is_free = true;
+            last->next_free = nullptr;
+            insert_free_block(last);
+        }
+
+        segment_size = new_segment_size;
+        return segment_size;
+    }
+
     void deallocate(void* ptr)
     {
         if (!ptr)
@@ -320,6 +388,11 @@ private:
     static std::size_t align_up(std::size_t value, std::size_t align = alignment) noexcept
     {
         return (value + align - 1) & ~(align - 1);
+    }
+
+    static std::size_t align_down(std::size_t value, std::size_t align = alignment) noexcept
+    {
+        return value & ~(align - 1);
     }
 
     static uintptr_t align_up_address(uintptr_t value, std::size_t align) noexcept
@@ -506,6 +579,40 @@ private:
         }
 
         return current == target ? prev : nullptr;
+    }
+
+    BlockHeader* last_block() const noexcept
+    {
+        uintptr_t current = reinterpret_cast<uintptr_t>(first_block.get());
+        const uintptr_t segment_end = segment_end_address();
+        BlockHeader* last = nullptr;
+        std::size_t visited_blocks = 0;
+        const std::size_t max_blocks = segment_size / alignment + 1;
+
+        while (current < segment_end)
+        {
+            BlockHeader* block = reinterpret_cast<BlockHeader*>(current);
+            if (block->size < sizeof(BlockHeader) || block->size % alignment != 0)
+            {
+                return nullptr;
+            }
+
+            uintptr_t next = current + block->size;
+            if (next <= current || next > segment_end)
+            {
+                return nullptr;
+            }
+
+            last = block;
+            current = next;
+            ++visited_blocks;
+            if (visited_blocks > max_blocks)
+            {
+                return nullptr;
+            }
+        }
+
+        return current == segment_end ? last : nullptr;
     }
 
     uintptr_t segment_begin_address() const noexcept

@@ -1,8 +1,10 @@
 #pragma once
 
+#include <chrono>
 #include <errno.h>
 #include <pthread.h>
 #include <system_error>
+#include <thread>
 
 namespace interprocess
 {
@@ -106,6 +108,34 @@ public:
         throw MutexOwnerDeadError();
     }
 
+    template <typename Clock, typename Duration>
+    bool try_lock_until(const std::chrono::time_point<Clock, Duration>& timeout_time)
+    {
+        MutexTryLockStatus status = try_lock_until_with_recovery_status(timeout_time);
+        if (status == MutexTryLockStatus::acquired)
+        {
+            return true;
+        }
+        if (status == MutexTryLockStatus::busy)
+        {
+            return false;
+        }
+
+        abandon_owner_dead_lock();
+        throw MutexOwnerDeadError();
+    }
+
+    template <typename Rep, typename Period>
+    bool try_lock_for(const std::chrono::duration<Rep, Period>& timeout_duration)
+    {
+        return try_lock_until(std::chrono::steady_clock::now() + timeout_duration);
+    }
+
+    bool timed_lock(const std::chrono::system_clock::time_point& timeout_time)
+    {
+        return try_lock_until(timeout_time);
+    }
+
     MutexLockStatus lock_with_recovery_status()
     {
         int res = pthread_mutex_lock(&mutex);
@@ -150,6 +180,39 @@ public:
             return MutexTryLockStatus::busy;
         }
         throw std::system_error(res, std::system_category(), "Failed to try_lock mutex");
+    }
+
+    template <typename Clock, typename Duration>
+    MutexTryLockStatus try_lock_until_with_recovery_status(
+        const std::chrono::time_point<Clock, Duration>& timeout_time)
+    {
+        while (true)
+        {
+            MutexTryLockStatus status = try_lock_with_recovery_status();
+            if (status != MutexTryLockStatus::busy)
+            {
+                return status;
+            }
+
+            auto now = Clock::now();
+            if (now >= timeout_time)
+            {
+                return MutexTryLockStatus::busy;
+            }
+
+            auto remaining = timeout_time - now;
+            auto sleep_time =
+                remaining < std::chrono::milliseconds(1) ? remaining : std::chrono::milliseconds(1);
+            std::this_thread::sleep_for(sleep_time);
+        }
+    }
+
+    template <typename Rep, typename Period>
+    MutexTryLockStatus try_lock_for_with_recovery_status(
+        const std::chrono::duration<Rep, Period>& timeout_duration)
+    {
+        return try_lock_until_with_recovery_status(std::chrono::steady_clock::now() +
+                                                   timeout_duration);
     }
 
     void unlock()

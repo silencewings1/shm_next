@@ -161,6 +161,144 @@ bool test_abandoned_construction_cleanup()
     return true;
 }
 
+bool test_static_segment_resize()
+{
+    const char* shm_name = "test_shm_static_resize";
+    const std::size_t initial_size = 64 * 1024;
+    const std::size_t grow_size = 64 * 1024;
+
+    ManagedSharedMemory::remove(shm_name);
+
+    try
+    {
+        {
+            ManagedSharedMemory segment(create_only, shm_name, initial_size);
+            int* value = segment.construct<int>("ResizeValue", 5);
+            if (!require(value != nullptr && *value == 5,
+                         "failed to construct value before resize"))
+            {
+                ManagedSharedMemory::remove(shm_name);
+                return false;
+            }
+        }
+
+        {
+            bool grew = ManagedSharedMemory::grow(shm_name, grow_size);
+            if (!grew)
+            {
+                ManagedSharedMemory segment(open_only, shm_name);
+                int* value = segment.find<int>("ResizeValue");
+                if (!require(value != nullptr && *value == 5,
+                             "failed static grow should leave existing object intact"))
+                {
+                    ManagedSharedMemory::remove(shm_name);
+                    return false;
+                }
+                if (!require(segment.get_segment_manager()->check_sanity(),
+                             "failed static grow should leave manager sane"))
+                {
+                    ManagedSharedMemory::remove(shm_name);
+                    return false;
+                }
+                segment.destroy<int>("ResizeValue");
+                ManagedSharedMemory::remove(shm_name);
+                return true;
+            }
+        }
+
+        {
+            ManagedSharedMemory segment(open_only, shm_name);
+            if (!require(segment.get_size() >= initial_size + grow_size,
+                         "grown segment size was not persisted"))
+            {
+                ManagedSharedMemory::remove(shm_name);
+                return false;
+            }
+
+            int* value = segment.find<int>("ResizeValue");
+            if (!require(value != nullptr && *value == 5,
+                         "named object should survive static grow"))
+            {
+                ManagedSharedMemory::remove(shm_name);
+                return false;
+            }
+
+            SharedMemoryManager* manager = segment.get_segment_manager();
+            void* large_allocation = manager->allocate(grow_size / 2, alignof(std::max_align_t));
+            if (!require(large_allocation != nullptr,
+                         "grown segment should provide allocatable space"))
+            {
+                ManagedSharedMemory::remove(shm_name);
+                return false;
+            }
+            manager->deallocate(large_allocation);
+            if (!require(manager->check_sanity(), "manager sanity failed after static grow"))
+            {
+                ManagedSharedMemory::remove(shm_name);
+                return false;
+            }
+        }
+
+        {
+            bool shrunk = ManagedSharedMemory::shrink_to_fit(shm_name);
+            if (!shrunk)
+            {
+                ManagedSharedMemory segment(open_only, shm_name);
+                int* value = segment.find<int>("ResizeValue");
+                if (!require(value != nullptr && *value == 5,
+                             "failed static shrink should leave existing object intact"))
+                {
+                    ManagedSharedMemory::remove(shm_name);
+                    return false;
+                }
+                if (!require(segment.get_segment_manager()->check_sanity(),
+                             "failed static shrink should leave manager sane"))
+                {
+                    ManagedSharedMemory::remove(shm_name);
+                    return false;
+                }
+                segment.destroy<int>("ResizeValue");
+                ManagedSharedMemory::remove(shm_name);
+                return true;
+            }
+        }
+
+        {
+            ManagedSharedMemory segment(open_only, shm_name);
+            if (!require(segment.get_size() < initial_size + grow_size,
+                         "shrunk segment size was not persisted"))
+            {
+                ManagedSharedMemory::remove(shm_name);
+                return false;
+            }
+
+            int* value = segment.find<int>("ResizeValue");
+            if (!require(value != nullptr && *value == 5,
+                         "named object should survive static shrink"))
+            {
+                ManagedSharedMemory::remove(shm_name);
+                return false;
+            }
+            if (!require(segment.get_segment_manager()->check_sanity(),
+                         "manager sanity failed after static shrink"))
+            {
+                ManagedSharedMemory::remove(shm_name);
+                return false;
+            }
+            segment.destroy<int>("ResizeValue");
+        }
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[Manager Lifecycle] static resize exception: " << e.what() << std::endl;
+        ManagedSharedMemory::remove(shm_name);
+        return false;
+    }
+
+    ManagedSharedMemory::remove(shm_name);
+    return true;
+}
+
 } // namespace
 
 int main()
@@ -188,6 +326,20 @@ int main()
         if (!require(segment.get_num_named_objects() == 0 &&
                          segment.get_num_total_named_objects() == 0,
                      "fresh manager should not have named objects"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        segment.reserve_named_objects(128);
+        if (!require(segment.get_reserved_named_objects() >= 128,
+                     "named object index reserve should update advisory capacity"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        segment.shrink_to_fit_indexes();
+        if (!require(segment.get_reserved_named_objects() == segment.get_num_total_named_objects(),
+                     "named object index shrink_to_fit should match current total size"))
         {
             ManagedSharedMemory::remove(shm_name);
             return 1;
@@ -350,6 +502,58 @@ int main()
             ManagedSharedMemory::remove(shm_name);
             return 1;
         }
+
+        {
+            ManagedSharedMemory read_only_segment(open_read_only, shm_name);
+            const int* read_only_value = read_only_segment.find_read_only<int>("FindOrConstruct");
+            if (!require(read_only_segment.is_read_only() && read_only_value != nullptr &&
+                             *read_only_value == 11,
+                         "read-only segment should find existing named object"))
+            {
+                ManagedSharedMemory::remove(shm_name);
+                return 1;
+            }
+            if (!require(read_only_segment.get_num_named_objects() ==
+                             segment.get_num_named_objects(),
+                         "read-only named object count mismatch"))
+            {
+                ManagedSharedMemory::remove(shm_name);
+                return 1;
+            }
+
+            std::size_t read_only_visits = 0;
+            read_only_segment.for_each_named_object_read_only(
+                [&](const char* object_name, const void* object_ptr, std::size_t instance_count) {
+                    if (std::string(object_name) == "FindOrConstruct" &&
+                        object_ptr == read_only_value && instance_count == 1)
+                    {
+                        ++read_only_visits;
+                    }
+                });
+            if (!require(read_only_visits == 1,
+                         "read-only named object iteration did not visit object"))
+            {
+                ManagedSharedMemory::remove(shm_name);
+                return 1;
+            }
+
+            bool read_only_rejected_write = false;
+            try
+            {
+                (void)read_only_segment.construct<int>("ReadOnlyWrite", 1);
+            }
+            catch (const std::runtime_error&)
+            {
+                read_only_rejected_write = true;
+            }
+            if (!require(read_only_rejected_write,
+                         "read-only segment should reject write operations"))
+            {
+                ManagedSharedMemory::remove(shm_name);
+                return 1;
+            }
+        }
+
         if (!require(segment.destroy<int>("FindOrConstruct"),
                      "failed to destroy find_or_construct object"))
         {
@@ -574,6 +778,12 @@ int main()
         if (!require(segment.get_num_named_objects() == 0 &&
                          segment.get_num_total_named_objects() == 0,
                      "all named objects should be removed"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+
+        if (!require(test_static_segment_resize(), "static segment resize test failed"))
         {
             ManagedSharedMemory::remove(shm_name);
             return 1;

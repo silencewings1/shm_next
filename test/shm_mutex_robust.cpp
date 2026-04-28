@@ -1,4 +1,5 @@
 #include "../interprocess/sync/posix_mutex.h"
+#include <chrono>
 #include <iostream>
 #include <new>
 #include <sys/mman.h>
@@ -24,10 +25,67 @@ struct SharedState
     }
 };
 
+bool test_timed_lock_api()
+{
+    InterprocessMutex mutex;
+    mutex.lock();
+
+    if (mutex.try_lock_for(std::chrono::milliseconds(5)))
+    {
+        std::cerr << "[Robust Mutex Test] try_lock_for acquired an already locked mutex"
+                  << std::endl;
+        mutex.unlock();
+        mutex.unlock();
+        return false;
+    }
+
+    if (mutex.try_lock_until(std::chrono::steady_clock::now() + std::chrono::milliseconds(5)))
+    {
+        std::cerr << "[Robust Mutex Test] try_lock_until acquired an already locked mutex"
+                  << std::endl;
+        mutex.unlock();
+        mutex.unlock();
+        return false;
+    }
+
+    if (mutex.try_lock_for_with_recovery_status(std::chrono::milliseconds(5)) !=
+        MutexTryLockStatus::busy)
+    {
+        std::cerr << "[Robust Mutex Test] timed recovery status should report busy" << std::endl;
+        mutex.unlock();
+        return false;
+    }
+
+    mutex.unlock();
+
+    if (!mutex.try_lock_for(std::chrono::milliseconds(50)))
+    {
+        std::cerr << "[Robust Mutex Test] try_lock_for failed on an unlocked mutex" << std::endl;
+        return false;
+    }
+    mutex.unlock();
+
+    if (mutex.try_lock_for_with_recovery_status(std::chrono::milliseconds(50)) !=
+        MutexTryLockStatus::acquired)
+    {
+        std::cerr << "[Robust Mutex Test] timed recovery status should acquire unlocked mutex"
+                  << std::endl;
+        return false;
+    }
+    mutex.unlock();
+
+    return true;
+}
+
 } // namespace
 
 int main()
 {
+    if (!test_timed_lock_api())
+    {
+        return 1;
+    }
+
     if (!InterprocessMutex::robust_supported())
     {
         std::cout << "[Robust Mutex Test] SKIPPED: robust pthread mutex is not supported on this "

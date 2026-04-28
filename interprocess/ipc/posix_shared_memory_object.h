@@ -20,12 +20,16 @@ struct create_only_t
 struct open_only_t
 {
 };
+struct open_read_only_t
+{
+};
 struct open_or_create_t
 {
 };
 
 constexpr create_only_t create_only{};
 constexpr open_only_t open_only{};
+constexpr open_read_only_t open_read_only{};
 constexpr open_or_create_t open_or_create{};
 
 enum class mode_t
