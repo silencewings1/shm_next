@@ -66,6 +66,24 @@ public:
         return manager->construct<T>(name, std::forward<Args>(args)...);
     }
 
+    template <typename T, typename... Args>
+    T* find_or_construct(const char* name, Args&&... args)
+    {
+        return manager->find_or_construct<T>(name, std::forward<Args>(args)...);
+    }
+
+    template <typename T, typename... Args>
+    T* construct_array(const char* name, std::size_t count, Args&&... args)
+    {
+        return manager->construct_array<T>(name, count, std::forward<Args>(args)...);
+    }
+
+    template <typename T, typename InputIt>
+    T* construct_array_from_range(const char* name, InputIt first, InputIt last)
+    {
+        return manager->construct_array_from_range<T>(name, first, last);
+    }
+
     // Find a named object
     template <typename T>
     T* find(const char* name)
@@ -74,9 +92,43 @@ public:
     }
 
     template <typename T>
+    T* find_array(const char* name, std::size_t* count = nullptr)
+    {
+        return manager->find_array<T>(name, count);
+    }
+
+    template <typename T>
     bool destroy(const char* name)
     {
         return manager->destroy<T>(name);
+    }
+
+    template <typename T>
+    bool destroy_array(const char* name)
+    {
+        return manager->destroy_array<T>(name);
+    }
+
+    template <typename T>
+    bool destroy_ptr(T* ptr)
+    {
+        return manager->destroy_ptr(ptr);
+    }
+
+    std::size_t get_num_named_objects() const
+    {
+        return manager->get_num_named_objects();
+    }
+
+    std::size_t get_num_total_named_objects() const
+    {
+        return manager->get_num_total_named_objects();
+    }
+
+    template <typename Func>
+    void for_each_named_object(Func&& func) const
+    {
+        manager->for_each_named_object(std::forward<Func>(func));
     }
 
     // Direct access to the segment manager
@@ -147,6 +199,7 @@ private:
                     if (state == SharedMemoryManager::InitializationState::initialized)
                     {
                         manager = SharedMemoryManager::attach(region.get_address());
+                        manager->recover_abandoned_named_objects();
                         return;
                     }
 
