@@ -6,6 +6,7 @@
 #include "posix_shared_memory_object.h"
 #include <chrono>
 #include <cstring>
+#include <cstdint>
 #include <string>
 #include <thread>
 #include <utility>
@@ -19,33 +20,30 @@ public:
     // Creates a new shared memory segment and initializes the manager
     ManagedSharedMemory(create_only_t, const char* name, std::size_t size,
                         ::mode_t permissions = 0666)
-        : shm(create_only, name, mode_t::read_write, permissions)
+        : shm(create_only, name, mode_t::read_write, permissions), region(), manager(nullptr)
     {
         shm.truncate(size);
         region = MappedRegion(shm, mode_t::read_write);
-        // Zero the memory to avoid garbage
-        std::memset(region.get_address(), 0, region.get_size());
-        manager = SharedMemoryManager::create(region.get_address(), region.get_size());
+        initialize_new_segment();
     }
 
     // Opens an existing shared memory segment and attaches to the manager
-    ManagedSharedMemory(open_only_t, const char* name) : shm(open_only, name, mode_t::read_write)
+    ManagedSharedMemory(open_only_t, const char* name)
+        : shm(open_only, name, mode_t::read_write), region(), manager(nullptr)
     {
-        region = MappedRegion(shm, mode_t::read_write);
-        manager = SharedMemoryManager::attach(region.get_address());
+        attach_existing_with_retry();
     }
 
     // Opens or creates a shared memory segment
     ManagedSharedMemory(open_or_create_t, const char* name, std::size_t size,
                         ::mode_t permissions = 0666)
-        : shm(open_or_create, name, mode_t::read_write, permissions)
+        : shm(open_or_create, name, mode_t::read_write, permissions), region(), manager(nullptr)
     {
         if (shm.was_created())
         {
             shm.truncate(size);
             region = MappedRegion(shm, mode_t::read_write);
-            std::memset(region.get_address(), 0, region.get_size());
-            manager = SharedMemoryManager::create(region.get_address(), region.get_size());
+            initialize_new_segment();
             return;
         }
 
@@ -103,6 +101,23 @@ public:
     }
 
 private:
+    void initialize_new_segment()
+    {
+        std::memset(region.get_address(), 0, region.get_size());
+        try
+        {
+            manager = SharedMemoryManager::create(region.get_address(), region.get_size());
+        }
+        catch (...)
+        {
+            if (region.get_size() >= SharedMemoryManager::minimum_initialization_size())
+            {
+                SharedMemoryManager::mark_corrupted(region.get_address());
+            }
+            throw;
+        }
+    }
+
     void attach_existing_with_retry()
     {
         constexpr int max_attempts = 100;
@@ -110,19 +125,54 @@ private:
 
         for (int attempt = 0; attempt < max_attempts; ++attempt)
         {
-            if (shm.get_size() != 0)
+            std::size_t current_size = shm.get_size();
+            if (current_size >= SharedMemoryManager::minimum_initialization_size())
             {
                 try
                 {
-                    region = MappedRegion(shm, mode_t::read_write);
-                    manager = SharedMemoryManager::attach(region.get_address());
-                    return;
+                    if (region.get_address() == nullptr)
+                    {
+                        region = MappedRegion(shm, mode_t::read_write);
+                    }
+
+                    SharedMemoryManager::InitializationState state =
+                        SharedMemoryManager::get_initialization_state(region.get_address());
+                    if (!SharedMemoryManager::is_known_initialization_state(state))
+                    {
+                        throw std::runtime_error(
+                            std::string("unknown shared memory initialization state: ") +
+                            std::to_string(static_cast<uint32_t>(state)));
+                    }
+
+                    if (state == SharedMemoryManager::InitializationState::initialized)
+                    {
+                        manager = SharedMemoryManager::attach(region.get_address());
+                        return;
+                    }
+
+                    if (state == SharedMemoryManager::InitializationState::corrupted)
+                    {
+                        throw std::runtime_error("shared memory segment is marked corrupted");
+                    }
+
+                    last_error = std::string("shared memory manager is ") +
+                                 SharedMemoryManager::initialization_state_name(state);
                 }
                 catch (const std::runtime_error& e)
                 {
                     last_error = e.what();
-                    region = MappedRegion();
+                    if (last_error.find("corrupted") != std::string::npos ||
+                        last_error.find("unknown shared memory initialization state") !=
+                            std::string::npos ||
+                        last_error.find("magic mismatch") != std::string::npos)
+                    {
+                        throw;
+                    }
                 }
+            }
+            else
+            {
+                last_error = "shared memory object is still empty";
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(10));

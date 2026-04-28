@@ -71,7 +71,15 @@ int main()
         return 1;
     }
 
-    state->mutex.lock();
+    MutexLockStatus recovery_status = state->mutex.lock_with_recovery_status();
+    if (recovery_status != MutexLockStatus::owner_dead)
+    {
+        std::cerr << "[Robust Mutex Test] expected owner-dead status" << std::endl;
+        state->mutex.unlock();
+        state->~SharedState();
+        munmap(memory, sizeof(SharedState));
+        return 1;
+    }
     if (state->value != 123)
     {
         std::cerr << "[Robust Mutex Test] shared value mismatch after owner-dead recovery"
@@ -81,6 +89,7 @@ int main()
         munmap(memory, sizeof(SharedState));
         return 1;
     }
+    state->mutex.mark_consistent();
     state->value = 456;
     state->mutex.unlock();
 

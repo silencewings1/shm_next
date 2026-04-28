@@ -4,7 +4,9 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <new>
+#include <stdexcept>
 
 namespace interprocess::detail
 {
@@ -23,6 +25,7 @@ static_assert(sizeof(BlockHeader) % 16 == 0, "BlockHeader size must be a multipl
 struct AllocationHeader
 {
     OffsetPtr<BlockHeader> block;
+    std::size_t requested_size;
 };
 
 class SharedMemoryBlockAllocator
@@ -36,13 +39,19 @@ class SharedMemoryBlockAllocator
     };
 
 public:
-    SharedMemoryBlockAllocator() noexcept : free_list_head(nullptr)
+    SharedMemoryBlockAllocator() noexcept
+        : segment_base(nullptr), segment_size(0), first_block(nullptr), free_list_head(nullptr)
     {
     }
 
     void initialize(void* segment_base, std::size_t manager_header_size, std::size_t total_size)
     {
         const std::size_t header_size = align_up(manager_header_size);
+        if (total_size < header_size + sizeof(BlockHeader))
+        {
+            throw std::runtime_error("Shared memory block allocator segment is too small.");
+        }
+
         BlockHeader* first_block =
             reinterpret_cast<BlockHeader*>(static_cast<char*>(segment_base) + header_size);
 
@@ -50,6 +59,9 @@ public:
         first_block->is_free = true;
         first_block->next_free = nullptr;
 
+        this->segment_base = segment_base;
+        this->segment_size = total_size;
+        this->first_block = first_block;
         free_list_head = first_block;
     }
 
@@ -70,7 +82,7 @@ public:
             const AllocationLayout layout = make_layout(curr, size, payload_alignment);
             if (curr->is_free && curr->size >= layout.total_size)
             {
-                return allocate_from_block(prev, curr, layout);
+                return allocate_from_block(prev, curr, layout, size);
             }
 
             prev = curr;
@@ -87,11 +99,25 @@ public:
             return;
         }
 
+        if (!has_allocation_header(ptr))
+        {
+            throw std::runtime_error("Invalid shared memory deallocation pointer");
+        }
+
         AllocationHeader* allocation_header =
             reinterpret_cast<AllocationHeader*>(static_cast<char*>(ptr) - sizeof(AllocationHeader));
         BlockHeader* block = allocation_header->block.get();
 
+        if (!is_valid_payload(ptr, block))
+        {
+            throw std::runtime_error("Invalid shared memory deallocation pointer");
+        }
+
         assert(!block->is_free && "Double free detected");
+        if (block->is_free)
+        {
+            throw std::runtime_error("Double free detected");
+        }
 
         block->is_free = true;
         insert_free_block(block);
@@ -109,6 +135,110 @@ public:
             curr = curr->next_free.get();
         }
         return free_mem;
+    }
+
+    bool owns(const void* ptr) const noexcept
+    {
+        return ptr != nullptr && is_address_in_segment(reinterpret_cast<uintptr_t>(ptr));
+    }
+
+    std::size_t allocation_size(const void* ptr) const
+    {
+        if (ptr == nullptr)
+        {
+            return 0;
+        }
+
+        if (!has_allocation_header(ptr))
+        {
+            throw std::runtime_error("Invalid shared memory allocation pointer");
+        }
+
+        AllocationHeader* allocation_header = reinterpret_cast<AllocationHeader*>(
+            const_cast<char*>(static_cast<const char*>(ptr)) - sizeof(AllocationHeader));
+        BlockHeader* block = allocation_header->block.get();
+        if (!is_valid_payload(ptr, block) || block->is_free)
+        {
+            throw std::runtime_error("Invalid shared memory allocation pointer");
+        }
+
+        return allocation_header->requested_size;
+    }
+
+    bool check_sanity() const noexcept
+    {
+        if (segment_base.get() == nullptr || segment_size == 0 || first_block.get() == nullptr)
+        {
+            return false;
+        }
+
+        if (!is_valid_free_list())
+        {
+            return false;
+        }
+
+        const uintptr_t segment_end = segment_end_address();
+        uintptr_t current = reinterpret_cast<uintptr_t>(first_block.get());
+        std::size_t visited_blocks = 0;
+        const std::size_t max_blocks = segment_size / alignment + 1;
+
+        while (current < segment_end)
+        {
+            if (!is_aligned_address(current))
+            {
+                return false;
+            }
+
+            const BlockHeader* block = reinterpret_cast<const BlockHeader*>(current);
+            if (block->size < sizeof(BlockHeader) || block->size % alignment != 0)
+            {
+                return false;
+            }
+
+            uintptr_t next = current + block->size;
+            if (next <= current || next > segment_end)
+            {
+                return false;
+            }
+
+            if (block->is_free != is_in_free_list(block))
+            {
+                return false;
+            }
+
+            current = next;
+            ++visited_blocks;
+            if (visited_blocks > max_blocks)
+            {
+                return false;
+            }
+        }
+
+        return current == segment_end;
+    }
+
+    bool all_memory_deallocated() const noexcept
+    {
+        BlockHeader* first = first_block.get();
+        if (first == nullptr)
+        {
+            return false;
+        }
+
+        return first->is_free &&
+               first->size == segment_end_address() - reinterpret_cast<uintptr_t>(first) &&
+               first->next_free.get() == nullptr && free_list_head.get() == first;
+    }
+
+    void zero_free_memory() noexcept
+    {
+        BlockHeader* curr = free_list_head.get();
+        while (curr != nullptr)
+        {
+            std::memset(reinterpret_cast<char*>(curr) + sizeof(BlockHeader), 0,
+                        curr->size - sizeof(BlockHeader));
+            curr = curr->next_free.get();
+        }
     }
 
 private:
@@ -146,7 +276,8 @@ private:
         return {reinterpret_cast<char*>(payload_start), used_size};
     }
 
-    void* allocate_from_block(BlockHeader* prev, BlockHeader* curr, const AllocationLayout& layout)
+    void* allocate_from_block(BlockHeader* prev, BlockHeader* curr, const AllocationLayout& layout,
+                              std::size_t requested_size)
     {
         const std::size_t header_size = sizeof(BlockHeader);
         const std::size_t remaining_size = curr->size - layout.total_size;
@@ -188,6 +319,7 @@ private:
         AllocationHeader* allocation_header =
             reinterpret_cast<AllocationHeader*>(layout.payload - sizeof(AllocationHeader));
         allocation_header->block = curr;
+        allocation_header->requested_size = requested_size;
 
         return layout.payload;
     }
@@ -255,6 +387,163 @@ private:
         }
     }
 
+    uintptr_t segment_begin_address() const noexcept
+    {
+        return reinterpret_cast<uintptr_t>(segment_base.get());
+    }
+
+    uintptr_t segment_end_address() const noexcept
+    {
+        return segment_begin_address() + segment_size;
+    }
+
+    static bool is_aligned_address(uintptr_t value) noexcept
+    {
+        return value % alignment == 0;
+    }
+
+    bool is_address_in_segment(uintptr_t value) const noexcept
+    {
+        return value >= segment_begin_address() && value < segment_end_address();
+    }
+
+    bool is_range_in_segment(uintptr_t begin, std::size_t size) const noexcept
+    {
+        return begin >= segment_begin_address() && begin <= segment_end_address() &&
+               size <= segment_end_address() - begin;
+    }
+
+    bool is_block_in_chain(const BlockHeader* target) const noexcept
+    {
+        const uintptr_t target_address = reinterpret_cast<uintptr_t>(target);
+        uintptr_t current = reinterpret_cast<uintptr_t>(first_block.get());
+        const uintptr_t segment_end = segment_end_address();
+        std::size_t visited_blocks = 0;
+        const std::size_t max_blocks = segment_size / alignment + 1;
+
+        while (current < segment_end)
+        {
+            if (current == target_address)
+            {
+                return true;
+            }
+
+            const BlockHeader* block = reinterpret_cast<const BlockHeader*>(current);
+            if (block->size < sizeof(BlockHeader) || block->size % alignment != 0)
+            {
+                return false;
+            }
+
+            uintptr_t next = current + block->size;
+            if (next <= current || next > segment_end)
+            {
+                return false;
+            }
+
+            current = next;
+            ++visited_blocks;
+            if (visited_blocks > max_blocks)
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    bool is_in_free_list(const BlockHeader* target) const noexcept
+    {
+        const BlockHeader* curr = free_list_head.get();
+        std::size_t visited_blocks = 0;
+        const std::size_t max_blocks = segment_size / alignment + 1;
+
+        while (curr != nullptr)
+        {
+            if (curr == target)
+            {
+                return true;
+            }
+            curr = curr->next_free.get();
+            ++visited_blocks;
+            if (visited_blocks > max_blocks)
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    bool is_valid_free_list() const noexcept
+    {
+        const std::size_t max_blocks = segment_size / alignment + 1;
+        std::size_t visited_blocks = 0;
+
+        const BlockHeader* curr = free_list_head.get();
+        while (curr != nullptr)
+        {
+            uintptr_t current_address = reinterpret_cast<uintptr_t>(curr);
+            if (!is_address_in_segment(current_address) || !is_aligned_address(current_address) ||
+                !curr->is_free || !is_block_in_chain(curr))
+            {
+                return false;
+            }
+
+            curr = curr->next_free.get();
+            ++visited_blocks;
+            if (visited_blocks > max_blocks)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool has_allocation_header(const void* ptr) const noexcept
+    {
+        if (!owns(ptr))
+        {
+            return false;
+        }
+
+        uintptr_t payload_address = reinterpret_cast<uintptr_t>(ptr);
+        if (payload_address < sizeof(AllocationHeader))
+        {
+            return false;
+        }
+
+        return is_range_in_segment(payload_address - sizeof(AllocationHeader),
+                                   sizeof(AllocationHeader));
+    }
+
+    bool is_valid_payload(const void* ptr, const BlockHeader* block) const noexcept
+    {
+        uintptr_t payload_address = reinterpret_cast<uintptr_t>(ptr);
+        if (!has_allocation_header(ptr) || block == nullptr)
+        {
+            return false;
+        }
+
+        uintptr_t block_address = reinterpret_cast<uintptr_t>(block);
+        if (!is_address_in_segment(block_address) || !is_aligned_address(block_address) ||
+            !is_block_in_chain(block))
+        {
+            return false;
+        }
+
+        uintptr_t block_payload_begin =
+            block_address + sizeof(BlockHeader) + sizeof(AllocationHeader);
+        uintptr_t block_end = block_address + block->size;
+        const AllocationHeader* allocation_header =
+            reinterpret_cast<const AllocationHeader*>(payload_address - sizeof(AllocationHeader));
+        return payload_address >= block_payload_begin && payload_address < block_end &&
+               allocation_header->requested_size <= block_end - payload_address;
+    }
+
+    OffsetPtr<void> segment_base;
+    std::size_t segment_size;
+    OffsetPtr<BlockHeader> first_block;
     OffsetPtr<BlockHeader> free_list_head;
 };
 

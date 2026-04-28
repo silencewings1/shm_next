@@ -76,6 +76,18 @@ int main()
     try
     {
         ManagedSharedMemory segment(create_only, shm_name, shm_size);
+        SharedMemoryManager* manager = segment.get_segment_manager();
+        if (!require(manager->check_sanity(), "fresh manager failed allocator sanity check"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        if (!require(manager->all_memory_deallocated(),
+                     "fresh manager should not have outstanding allocations"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
 
         std::atomic<bool> entered{false};
         std::atomic<bool> finish{false};
@@ -210,8 +222,31 @@ int main()
             ManagedSharedMemory::remove(shm_name);
             return 1;
         }
+        if (!require(manager->owns(aligned), "manager should report owning constructed object"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        if (!require(manager->allocation_size(aligned) >= sizeof(OverAlignedObject),
+                     "allocation size should cover constructed object"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
         if (!require(segment.destroy<OverAlignedObject>("OverAlignedObject"),
                      "failed to destroy over-aligned object"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        manager->zero_free_memory();
+        if (!require(manager->check_sanity(), "manager failed allocator sanity check"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        if (!require(manager->all_memory_deallocated(),
+                     "manager should have no outstanding allocations"))
         {
             ManagedSharedMemory::remove(shm_name);
             return 1;
