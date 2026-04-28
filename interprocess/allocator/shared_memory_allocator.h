@@ -49,7 +49,7 @@ public:
 
         (void)hint;
 
-        void* ptr = manager->allocate(n * sizeof(T));
+        void* ptr = manager->allocate(n * sizeof(T), alignof(T));
         if (!ptr)
         {
             throw std::bad_alloc();

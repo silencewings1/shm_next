@@ -29,7 +29,7 @@ public:
 
     static const size_type npos = static_cast<size_type>(-1);
 
-    explicit BasicSharedMemoryString(const Allocator& alloc) noexcept
+    explicit BasicSharedMemoryString(const Allocator& alloc)
         : allocator(alloc), start(nullptr), finish(nullptr), end_of_storage(nullptr)
     {
         init_empty();
@@ -93,7 +93,7 @@ public:
         return *this;
     }
 
-    BasicSharedMemoryString& operator=(BasicSharedMemoryString&& other) noexcept
+    BasicSharedMemoryString& operator=(BasicSharedMemoryString&& other)
     {
         if (this == &other)
             return *this;
@@ -277,14 +277,14 @@ public:
     }
 
 private:
-    void init_empty() noexcept
+    void init_empty()
     {
         reallocate(0);
         *start = CharT(0);
         finish = start;
     }
 
-    void release_storage() noexcept
+    void release_storage()
     {
         if (start)
         {

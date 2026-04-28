@@ -16,7 +16,9 @@
   - 它把容器的元素分配转发给 `SharedMemoryManager`，让对象真正落在共享内存里。
 - `shared_memory_manager.h`
   - 定义 `SharedMemoryManager`。
-  - 它位于共享内存段开头，负责管理空闲块、分配/释放内存，以及按名字构造和查找对象。
+  - 它位于共享内存段开头，协调内部 block allocator 和 named object registry，负责分配/释放内存，以及按名字构造、查找和销毁对象。
+- `detail/`
+  - 放置 allocator 内部实现，包括 block allocator 和 named object registry。
 
 ### `container/`
 
@@ -30,7 +32,7 @@
   - 接口风格接近 `std::vector`，内部使用共享内存 allocator。
 - `shared_memory_map.h`
   - 提供 `SharedMemoryMap<Key, T, Compare>`。
-  - 接口风格接近 `std::map`，内部使用红黑树保存键值对，支持有序遍历、查找、插入、删除等操作。
+  - 接口风格接近 `std::map`，内部使用 `container/detail/` 下的红黑树实现保存键值对，支持有序遍历、查找、插入、删除等操作。
 
 ### `ipc/`
 
@@ -47,6 +49,7 @@
     - 获取 `SharedMemoryAllocator<T>`
     - `construct<T>(name, ...)`
     - `find<T>(name)`
+    - `destroy<T>(name)`
     - 查询剩余内存
 
 ### `sync/`
@@ -56,6 +59,7 @@
 - `posix_mutex.h`
   - `InterprocessMutex`
   - 基于 `pthread_mutex_t`，使用 `PTHREAD_PROCESS_SHARED`，可在多个进程间共享。
+  - 在支持 `PTHREAD_MUTEX_ROBUST` 的平台上会启用 robust mutex，并在 owner-dead 后自动 mark consistent，避免其他进程永久阻塞。
 - `posix_condition.h`
   - `InterprocessCondition`
   - 基于 `pthread_cond_t`，可与 `InterprocessMutex` 配合使用。
@@ -234,9 +238,15 @@ ManagedSharedMemory segment(open_only, "demo_segment");
 RootObject* root = segment.find<RootObject>("RootObject");
 ```
 
+对象不再需要时可以显式销毁：
+
+```cpp
+segment.destroy<RootObject>("RootObject");
+```
+
 ## 当前已覆盖的能力
 
-- 命名对象构造与查找
+- 命名对象构造、查找与销毁
 - 共享内存字符串
 - 共享内存向量
 - 共享内存有序 map
@@ -253,6 +263,8 @@ RootObject* root = segment.find<RootObject>("RootObject");
 - `shm_map_producer.cpp` / `shm_map_consumer.cpp`
 - `shm_open_or_create.cpp`
 - `shm_semaphore.cpp`
+- `shm_mutex_robust.cpp`
+- `shm_manager_lifecycle.cpp`
 
 其中：
 
@@ -270,6 +282,27 @@ RootObject* root = segment.find<RootObject>("RootObject");
 - 不要在共享对象内部保存普通裸指针、`std::string`、`std::vector` 等进程私有内存对象。
 - 多进程并发读写共享对象时，必须由调用方保证同步。
 - `open_or_create` 已区分首次创建和打开已有段；极端崩溃恢复场景仍建议由业务层做清理或重建策略。
+
+可通过 CTest 运行已注册的独立用例：
+
+```sh
+ctest --test-dir build --output-on-failure
+```
+
+## 安装与 CMake 集成
+
+项目支持 CMake install/export：
+
+```sh
+cmake --install build --prefix /your/install/prefix
+```
+
+下游项目可使用导出目标：
+
+```cmake
+find_package(shm_next REQUIRED CONFIG)
+target_link_libraries(your_target PRIVATE shm_next::interprocess)
+```
 
 ## 一句话总结
 

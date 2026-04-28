@@ -45,9 +45,22 @@ public:
         if (n != 0)
         {
             reallocate_exact(n);
-            for (size_type i = 0; i < n; ++i)
+            size_type constructed = 0;
+            try
             {
-                allocator.construct(start.get() + i, other[i]);
+                for (; constructed < n; ++constructed)
+                {
+                    allocator.construct(start.get() + constructed, other[constructed]);
+                }
+            }
+            catch (...)
+            {
+                destroy_range(start.get(), constructed);
+                allocator.deallocate(start.get(), capacity());
+                start = nullptr;
+                finish = nullptr;
+                end_of_storage = nullptr;
+                throw;
             }
             finish = start + n;
         }
@@ -195,17 +208,13 @@ public:
         if (pos == end())
             return;
 
-        // Destroy the element at pos
-        allocator.destroy(pos.get());
-
-        // Move subsequent elements forward
         for (iterator next = pos + 1; next != end(); ++pos, ++next)
         {
-            allocator.construct(pos.get(), std::move(*next));
-            allocator.destroy(next.get());
+            *pos = std::move(*next);
         }
 
         finish -= 1;
+        allocator.destroy(finish.get());
     }
 
 private:
@@ -223,32 +232,62 @@ private:
 
     void assign_from(const SharedMemoryVector& other)
     {
-        release_storage();
         const size_type n = other.size();
         if (n == 0)
-            return;
-        reallocate_exact(n);
-        for (size_type i = 0; i < n; ++i)
         {
-            allocator.construct(start.get() + i, other[i]);
+            release_storage();
+            return;
         }
-        finish = start + n;
+
+        T* new_data = allocator.allocate(n);
+        size_type constructed = 0;
+        try
+        {
+            for (; constructed < n; ++constructed)
+            {
+                allocator.construct(new_data + constructed, other[constructed]);
+            }
+        }
+        catch (...)
+        {
+            destroy_range(new_data, constructed);
+            allocator.deallocate(new_data, n);
+            throw;
+        }
+
+        release_storage();
+        start.set_pointer(new_data);
+        finish.set_pointer(new_data + n);
+        end_of_storage.set_pointer(new_data + n);
     }
 
     void reallocate(size_type new_capacity)
     {
         size_type old_size = size();
+        size_type old_capacity = capacity();
+        T* old_data = start.get();
         T* new_data = allocator.allocate(new_capacity);
 
-        for (size_type i = 0; i < old_size; ++i)
+        size_type constructed = 0;
+        try
         {
-            allocator.construct(new_data + i, std::move(start[i]));
-            allocator.destroy(start.get() + i);
+            for (; constructed < old_size; ++constructed)
+            {
+                allocator.construct(new_data + constructed,
+                                    std::move_if_noexcept(old_data[constructed]));
+            }
+        }
+        catch (...)
+        {
+            destroy_range(new_data, constructed);
+            allocator.deallocate(new_data, new_capacity);
+            throw;
         }
 
-        if (start)
+        destroy_range(old_data, old_size);
+        if (old_data)
         {
-            allocator.deallocate(start.get(), capacity());
+            allocator.deallocate(old_data, old_capacity);
         }
 
         start.set_pointer(new_data);
@@ -260,15 +299,20 @@ private:
     {
         if (start)
         {
-            allocator.deallocate(start.get(), capacity());
-            start = nullptr;
-            finish = nullptr;
-            end_of_storage = nullptr;
+            release_storage();
         }
         T* new_data = allocator.allocate(new_capacity);
         start.set_pointer(new_data);
         finish.set_pointer(new_data);
         end_of_storage.set_pointer(new_data + new_capacity);
+    }
+
+    void destroy_range(T* data, size_type count)
+    {
+        for (size_type i = 0; i < count; ++i)
+        {
+            allocator.destroy(data + i);
+        }
     }
 
     Allocator allocator;

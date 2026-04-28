@@ -75,6 +75,12 @@ public:
         return manager->find<T>(name);
     }
 
+    template <typename T>
+    bool destroy(const char* name)
+    {
+        return manager->destroy<T>(name);
+    }
+
     // Direct access to the segment manager
     SharedMemoryManager* get_segment_manager() const
     {
