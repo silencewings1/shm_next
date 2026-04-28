@@ -141,6 +141,30 @@ public:
         with_manager_lock([&] { block_allocator.deallocate(ptr); });
     }
 
+    void allocate_many(std::size_t size, std::size_t count, std::size_t alignment, void** out)
+    {
+        if (out == nullptr && count != 0)
+        {
+            throw std::invalid_argument("allocate_many output array must not be null");
+        }
+        with_manager_lock([&] { block_allocator.allocate_many(size, count, alignment, out); });
+    }
+
+    void deallocate_many(void* const* ptrs, std::size_t count)
+    {
+        if (ptrs == nullptr && count != 0)
+        {
+            throw std::invalid_argument("deallocate_many pointer array must not be null");
+        }
+        with_manager_lock([&] { block_allocator.deallocate_many(ptrs, count); });
+    }
+
+    bool try_expand(void* ptr, std::size_t new_size, std::size_t alignment)
+    {
+        return with_manager_lock(
+            [&] { return block_allocator.try_expand(ptr, new_size, alignment); });
+    }
+
     template <typename T, typename... Args>
     T* construct(const char* name, Args&&... args)
     {

@@ -1,4 +1,5 @@
 #include "../interprocess/container/shared_memory_string.h"
+#include "../interprocess/container/shared_memory_map.h"
 #include "../interprocess/ipc/managed_shared_memory.h"
 #include <atomic>
 #include <chrono>
@@ -9,9 +10,15 @@
 #include <string>
 #include <sys/wait.h>
 #include <thread>
+#include <type_traits>
 #include <unistd.h>
 
 using namespace interprocess;
+
+static_assert(std::is_constructible<OffsetPtr<const int>, OffsetPtr<int>>::value,
+              "OffsetPtr should allow non-const to const conversion");
+static_assert(!std::is_constructible<OffsetPtr<int>, OffsetPtr<const int>>::value,
+              "OffsetPtr should reject const to non-const conversion");
 
 namespace
 {
@@ -181,6 +188,50 @@ int main()
         if (!require(segment.get_num_named_objects() == 0 &&
                          segment.get_num_total_named_objects() == 0,
                      "fresh manager should not have named objects"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+
+        void* batch[4] = {};
+        manager->allocate_many(sizeof(int), 4, alignof(int), batch);
+        bool batch_ok = true;
+        for (void* ptr : batch)
+        {
+            batch_ok = batch_ok && ptr != nullptr && manager->owns(ptr) &&
+                       manager->allocation_size(ptr) == sizeof(int);
+        }
+        if (!require(batch_ok, "allocate_many did not return owned fixed-size blocks"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        manager->deallocate_many(batch, 4);
+
+        void* expandable = manager->allocate(32, alignof(std::max_align_t));
+        void* adjacent = manager->allocate(64, alignof(std::max_align_t));
+        manager->deallocate(adjacent);
+        if (!require(manager->try_expand(expandable, 80, alignof(std::max_align_t)),
+                     "allocator should expand into adjacent free block"))
+        {
+            manager->deallocate(expandable);
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        if (!require(manager->allocation_size(expandable) == 80,
+                     "expanded allocation size should be updated"))
+        {
+            manager->deallocate(expandable);
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        manager->deallocate(expandable);
+
+        int offset_value = 42;
+        OffsetPtr<int> offset_ptr(&offset_value);
+        OffsetPtr<const int> const_offset_ptr(offset_ptr);
+        if (!require(offset_ptr.get() == &offset_value && const_offset_ptr.get() == &offset_value,
+                     "OffsetPtr conversion should preserve target address"))
         {
             ManagedSharedMemory::remove(shm_name);
             return 1;
@@ -376,6 +427,53 @@ int main()
             return 1;
         }
         segment.destroy<int>("ThrowArray");
+
+        using IntMap = SharedMemoryMap<int, int>;
+        using IntMapAllocator = SharedMemoryAllocator<std::pair<const int, int>>;
+        IntMap* pooled_map = segment.construct<IntMap>("PooledMap", IntMapAllocator(manager));
+        if (!require(pooled_map != nullptr, "failed to construct pooled map"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        pooled_map->emplace(1, 10);
+        pooled_map->emplace(2, 20);
+        const std::size_t allocations_after_insert = pooled_map->node_pool_allocations();
+        pooled_map->erase(1);
+        if (!require(pooled_map->cached_node_count() == 1,
+                     "map erase should cache one node for reuse"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        pooled_map->emplace(3, 30);
+        if (!require(pooled_map->node_pool_hits() == 1 &&
+                         pooled_map->node_pool_allocations() == allocations_after_insert &&
+                         pooled_map->cached_node_count() == 0,
+                     "map insert should reuse cached node without a new allocation"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        pooled_map->erase(2);
+        if (!require(pooled_map->cached_node_count() == 1,
+                     "map erase should cache reusable node after reuse"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        pooled_map->shrink_to_fit();
+        if (!require(pooled_map->cached_node_count() == 0,
+                     "map shrink_to_fit should release cached nodes"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        if (!require(segment.destroy<IntMap>("PooledMap"), "failed to destroy pooled map"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
 
         int destroyed_count = 0;
         DestroyCounter* counter =

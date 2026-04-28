@@ -36,6 +36,11 @@ private:
         }
     };
 
+    struct FreeNode
+    {
+        OffsetPtr<FreeNode> next;
+    };
+
     template <typename U>
     using rebind_alloc_t = typename Allocator::template rebind<U>::other;
 
@@ -146,29 +151,40 @@ public:
     using const_iterator = BasicIterator<const value_type, const value_type*, const value_type&>;
 
     explicit SharedMemoryRbTreeMap(const allocator_type& alloc) noexcept
-        : allocator(alloc), node_allocator(alloc.get_manager()), compare(), root(nullptr), size_(0)
+        : allocator(alloc), node_allocator(alloc.get_manager()), compare(), root(nullptr),
+          free_nodes(nullptr), size_(0), cached_node_count_(0), node_pool_hits_(0),
+          node_pool_allocations_(0)
     {
     }
 
     SharedMemoryRbTreeMap(const key_compare& comp, const allocator_type& alloc) noexcept
         : allocator(alloc), node_allocator(alloc.get_manager()), compare(comp), root(nullptr),
-          size_(0)
+          free_nodes(nullptr), size_(0), cached_node_count_(0), node_pool_hits_(0),
+          node_pool_allocations_(0)
     {
     }
 
     SharedMemoryRbTreeMap(const SharedMemoryRbTreeMap& other)
         : allocator(other.allocator), node_allocator(other.allocator.get_manager()),
-          compare(other.compare), root(nullptr), size_(0)
+          compare(other.compare), root(nullptr), free_nodes(nullptr), size_(0),
+          cached_node_count_(0), node_pool_hits_(0), node_pool_allocations_(0)
     {
         copy_from(other);
     }
 
     SharedMemoryRbTreeMap(SharedMemoryRbTreeMap&& other) noexcept
         : allocator(other.allocator), node_allocator(other.allocator.get_manager()),
-          compare(std::move(other.compare)), root(other.root), size_(other.size_)
+          compare(std::move(other.compare)), root(other.root), free_nodes(other.free_nodes),
+          size_(other.size_), cached_node_count_(other.cached_node_count_),
+          node_pool_hits_(other.node_pool_hits_),
+          node_pool_allocations_(other.node_pool_allocations_)
     {
         other.root = nullptr;
+        other.free_nodes = nullptr;
         other.size_ = 0;
+        other.cached_node_count_ = 0;
+        other.node_pool_hits_ = 0;
+        other.node_pool_allocations_ = 0;
     }
 
     SharedMemoryRbTreeMap& operator=(const SharedMemoryRbTreeMap& other)
@@ -196,10 +212,19 @@ public:
 
         if (allocator == other.allocator)
         {
+            release_cached_nodes();
             root = other.root;
+            free_nodes = other.free_nodes;
             size_ = other.size_;
+            cached_node_count_ = other.cached_node_count_;
+            node_pool_hits_ = other.node_pool_hits_;
+            node_pool_allocations_ = other.node_pool_allocations_;
             other.root = nullptr;
+            other.free_nodes = nullptr;
             other.size_ = 0;
+            other.cached_node_count_ = 0;
+            other.node_pool_hits_ = 0;
+            other.node_pool_allocations_ = 0;
             return *this;
         }
 
@@ -214,6 +239,7 @@ public:
     ~SharedMemoryRbTreeMap()
     {
         clear();
+        release_cached_nodes();
     }
 
     iterator begin() noexcept
@@ -254,6 +280,21 @@ public:
     size_type size() const noexcept
     {
         return size_;
+    }
+
+    size_type cached_node_count() const noexcept
+    {
+        return cached_node_count_;
+    }
+
+    size_type node_pool_hits() const noexcept
+    {
+        return node_pool_hits_;
+    }
+
+    size_type node_pool_allocations() const noexcept
+    {
+        return node_pool_allocations_;
     }
 
     allocator_type get_allocator() const noexcept
@@ -319,6 +360,11 @@ public:
         {
             erase_node(root.get());
         }
+    }
+
+    void shrink_to_fit()
+    {
+        release_cached_nodes();
     }
 
     iterator find(const key_type& key)
@@ -591,14 +637,29 @@ private:
     template <typename ValueArg>
     Node* create_node(ValueArg&& value)
     {
-        Node* storage = node_allocator.allocate(1);
+        Node* storage = pop_cached_node();
+        bool from_cache = storage != nullptr;
+        if (storage == nullptr)
+        {
+            storage = node_allocator.allocate(1);
+            ++node_pool_allocations_;
+        }
+
         try
         {
             node_allocator.construct(storage, std::forward<ValueArg>(value));
         }
         catch (...)
         {
-            node_allocator.deallocate(storage, 1);
+            if (from_cache)
+            {
+                push_cached_node(storage);
+            }
+            else
+            {
+                node_allocator.deallocate(storage, 1);
+                --node_pool_allocations_;
+            }
             throw;
         }
         return storage;
@@ -611,7 +672,48 @@ private:
             return;
         }
         node_allocator.destroy(node);
-        node_allocator.deallocate(node, 1);
+        push_cached_node(node);
+    }
+
+    Node* pop_cached_node() noexcept
+    {
+        Node* node = free_nodes.get();
+        if (node == nullptr)
+        {
+            return nullptr;
+        }
+
+        FreeNode* free_node = reinterpret_cast<FreeNode*>(node);
+        free_nodes = reinterpret_cast<Node*>(free_node->next.get());
+        --cached_node_count_;
+        ++node_pool_hits_;
+        return node;
+    }
+
+    void push_cached_node(Node* node) noexcept
+    {
+        FreeNode* free_node = reinterpret_cast<FreeNode*>(node);
+        free_node->next = reinterpret_cast<FreeNode*>(free_nodes.get());
+        free_nodes = node;
+        ++cached_node_count_;
+    }
+
+    void release_cached_nodes() noexcept
+    {
+        Node* node = free_nodes.get();
+        while (node != nullptr)
+        {
+            FreeNode* free_node = reinterpret_cast<FreeNode*>(node);
+            Node* next = reinterpret_cast<Node*>(free_node->next.get());
+            node_allocator.deallocate(node, 1);
+            if (node_pool_allocations_ > 0)
+            {
+                --node_pool_allocations_;
+            }
+            node = next;
+        }
+        free_nodes = nullptr;
+        cached_node_count_ = 0;
     }
 
     void rotate_left(Node* node)
@@ -948,7 +1050,11 @@ private:
     node_allocator_type node_allocator;
     key_compare compare;
     OffsetPtr<Node> root;
+    OffsetPtr<Node> free_nodes;
     size_type size_;
+    size_type cached_node_count_;
+    size_type node_pool_hits_;
+    size_type node_pool_allocations_;
 };
 
 } // namespace interprocess::detail

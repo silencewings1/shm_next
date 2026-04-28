@@ -1,11 +1,36 @@
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <limits>
+#include <type_traits>
 
 namespace interprocess
 {
+
+namespace detail
+{
+
+constexpr int64_t offset_ptr_null = 1;
+
+template <typename To, typename From>
+using enable_offset_ptr_conversion_t =
+    std::enable_if_t<std::is_convertible<From*, To*>::value, int>;
+
+inline int64_t make_offset(const void* self, const void* ptr) noexcept
+{
+    intptr_t self_addr = reinterpret_cast<intptr_t>(self);
+    intptr_t ptr_addr = reinterpret_cast<intptr_t>(ptr);
+    intptr_t diff = ptr_addr - self_addr;
+    assert(diff != offset_ptr_null && "OffsetPtr target address conflicts with null sentinel");
+    assert(diff >= static_cast<intptr_t>(std::numeric_limits<int64_t>::min()) &&
+           diff <= static_cast<intptr_t>(std::numeric_limits<int64_t>::max()));
+    return static_cast<int64_t>(diff);
+}
+
+} // namespace detail
 
 // A self-relative pointer that can be used in shared memory.
 // It stores the offset between its own address and the target address.
@@ -19,11 +44,11 @@ public:
     using value_type = T;
     using iterator_category = std::random_access_iterator_tag;
 
-    OffsetPtr() noexcept : offset(1)
+    OffsetPtr() noexcept : offset(detail::offset_ptr_null)
     {
     } // 1 is used as internal representation for nullptr
 
-    OffsetPtr(std::nullptr_t) noexcept : offset(1)
+    OffsetPtr(std::nullptr_t) noexcept : offset(detail::offset_ptr_null)
     {
     }
 
@@ -37,7 +62,7 @@ public:
         set_pointer(other.get());
     }
 
-    template <typename U>
+    template <typename U, detail::enable_offset_ptr_conversion_t<T, U> = 0>
     OffsetPtr(const OffsetPtr<U>& other) noexcept
     {
         set_pointer(other.get());
@@ -57,7 +82,7 @@ public:
 
     T* get() const noexcept
     {
-        if (offset == 1)
+        if (offset == detail::offset_ptr_null)
             return nullptr;
         return reinterpret_cast<T*>(reinterpret_cast<char*>(const_cast<OffsetPtr*>(this)) + offset);
     }
@@ -66,11 +91,11 @@ public:
     {
         if (!ptr)
         {
-            offset = 1;
+            offset = detail::offset_ptr_null;
         }
         else
         {
-            offset = reinterpret_cast<char*>(ptr) - reinterpret_cast<char*>(this);
+            offset = detail::make_offset(this, ptr);
         }
     }
 
@@ -191,10 +216,10 @@ public:
     using difference_type = std::ptrdiff_t;
     using value_type = void;
 
-    OffsetPtr() noexcept : offset(1)
+    OffsetPtr() noexcept : offset(detail::offset_ptr_null)
     {
     }
-    OffsetPtr(std::nullptr_t) noexcept : offset(1)
+    OffsetPtr(std::nullptr_t) noexcept : offset(detail::offset_ptr_null)
     {
     }
     OffsetPtr(void* ptr) noexcept
@@ -228,7 +253,7 @@ public:
 
     void* get() const noexcept
     {
-        if (offset == 1)
+        if (offset == detail::offset_ptr_null)
             return nullptr;
         return reinterpret_cast<char*>(const_cast<OffsetPtr*>(this)) + offset;
     }
@@ -237,11 +262,11 @@ public:
     {
         if (!ptr)
         {
-            offset = 1;
+            offset = detail::offset_ptr_null;
         }
         else
         {
-            offset = reinterpret_cast<char*>(ptr) - reinterpret_cast<char*>(this);
+            offset = detail::make_offset(this, ptr);
         }
     }
 
@@ -274,10 +299,10 @@ public:
     using difference_type = std::ptrdiff_t;
     using value_type = const void;
 
-    OffsetPtr() noexcept : offset(1)
+    OffsetPtr() noexcept : offset(detail::offset_ptr_null)
     {
     }
-    OffsetPtr(std::nullptr_t) noexcept : offset(1)
+    OffsetPtr(std::nullptr_t) noexcept : offset(detail::offset_ptr_null)
     {
     }
     OffsetPtr(const void* ptr) noexcept
@@ -291,7 +316,7 @@ public:
         set_pointer(ptr);
     }
 
-    template <typename U>
+    template <typename U, detail::enable_offset_ptr_conversion_t<const void, U> = 0>
     OffsetPtr(const OffsetPtr<U>& other) noexcept
     {
         set_pointer(other.get());
@@ -311,7 +336,7 @@ public:
 
     const void* get() const noexcept
     {
-        if (offset == 1)
+        if (offset == detail::offset_ptr_null)
             return nullptr;
         return reinterpret_cast<const char*>(this) + offset;
     }
@@ -320,11 +345,11 @@ public:
     {
         if (!ptr)
         {
-            offset = 1;
+            offset = detail::offset_ptr_null;
         }
         else
         {
-            offset = reinterpret_cast<const char*>(ptr) - reinterpret_cast<const char*>(this);
+            offset = detail::make_offset(this, ptr);
         }
     }
 

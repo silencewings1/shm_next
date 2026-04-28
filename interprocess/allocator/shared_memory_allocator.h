@@ -42,7 +42,7 @@ public:
 
     pointer allocate(size_type n, const void* hint = nullptr)
     {
-        if (n > std::size_t(-1) / sizeof(T))
+        if (n > max_size())
         {
             throw std::bad_alloc();
         }
@@ -57,6 +57,15 @@ public:
         return static_cast<pointer>(ptr);
     }
 
+    void allocate_many(size_type n, size_type count, pointer* out)
+    {
+        if (n > max_size())
+        {
+            throw std::bad_alloc();
+        }
+        manager->allocate_many(n * sizeof(T), count, alignof(T), reinterpret_cast<void**>(out));
+    }
+
     void deallocate(pointer p, size_type n)
     {
         (void)n;
@@ -64,6 +73,26 @@ public:
         {
             manager->deallocate(p);
         }
+    }
+
+    void deallocate_many(pointer const* ptrs, size_type count)
+    {
+        manager->deallocate_many(reinterpret_cast<void* const*>(ptrs), count);
+    }
+
+    bool try_expand(pointer p, size_type old_count, size_type new_count)
+    {
+        (void)old_count;
+        if (new_count > max_size())
+        {
+            return false;
+        }
+        return manager->try_expand(p, new_count * sizeof(T), alignof(T));
+    }
+
+    size_type max_size() const noexcept
+    {
+        return std::size_t(-1) / sizeof(T);
     }
 
     template <typename U, typename... Args>

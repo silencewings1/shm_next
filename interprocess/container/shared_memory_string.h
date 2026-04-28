@@ -299,6 +299,15 @@ private:
     {
         size_type old_size = size();
         // We need new_capacity + 1 for the null terminator
+        if (start && new_capacity > capacity() &&
+            allocator.try_expand(start.get(), capacity() + 1, new_capacity + 1))
+        {
+            finish.set_pointer(start.get() + old_size);
+            end_of_storage.set_pointer(start.get() + new_capacity);
+            *finish = CharT(0);
+            return;
+        }
+
         CharT* new_data = allocator.allocate(new_capacity + 1);
 
         if (start)

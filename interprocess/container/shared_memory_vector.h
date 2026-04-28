@@ -266,6 +266,15 @@ private:
         size_type old_size = size();
         size_type old_capacity = capacity();
         T* old_data = start.get();
+
+        if (old_data && new_capacity > old_capacity &&
+            allocator.try_expand(old_data, old_capacity, new_capacity))
+        {
+            finish.set_pointer(old_data + old_size);
+            end_of_storage.set_pointer(old_data + new_capacity);
+            return;
+        }
+
         T* new_data = allocator.allocate(new_capacity);
 
         size_type constructed = 0;

@@ -92,6 +92,84 @@ public:
         throw std::bad_alloc();
     }
 
+    void allocate_many(std::size_t size, std::size_t count, std::size_t requested_alignment,
+                       void** out)
+    {
+        std::size_t allocated = 0;
+        try
+        {
+            for (; allocated < count; ++allocated)
+            {
+                out[allocated] = allocate(size, requested_alignment);
+            }
+        }
+        catch (...)
+        {
+            while (allocated > 0)
+            {
+                --allocated;
+                deallocate(out[allocated]);
+                out[allocated] = nullptr;
+            }
+            throw;
+        }
+    }
+
+    void deallocate_many(void* const* ptrs, std::size_t count)
+    {
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            deallocate(ptrs[i]);
+        }
+    }
+
+    bool try_expand(void* ptr, std::size_t new_size, std::size_t requested_alignment = alignment)
+    {
+        if (ptr == nullptr || new_size == 0 || !has_allocation_header(ptr))
+        {
+            return false;
+        }
+
+        AllocationHeader* allocation_header =
+            reinterpret_cast<AllocationHeader*>(static_cast<char*>(ptr) - sizeof(AllocationHeader));
+        BlockHeader* block = allocation_header->block.get();
+        if (!is_valid_payload(ptr, block) || block->is_free)
+        {
+            return false;
+        }
+
+        const std::size_t payload_alignment = normalize_alignment(requested_alignment);
+        AllocationLayout expanded_layout = make_layout(block, new_size, payload_alignment);
+        if (expanded_layout.payload != ptr)
+        {
+            return false;
+        }
+
+        if (expanded_layout.total_size <= block->size)
+        {
+            allocation_header->requested_size = new_size;
+            return true;
+        }
+
+        BlockHeader* next = physical_next(block);
+        if (next == nullptr || !next->is_free)
+        {
+            return false;
+        }
+
+        const std::size_t combined_size = block->size + next->size;
+        if (combined_size < expanded_layout.total_size)
+        {
+            return false;
+        }
+
+        remove_free_block(next);
+        block->size = combined_size;
+        split_allocated_block(block, expanded_layout.total_size);
+        allocation_header->requested_size = new_size;
+        return true;
+    }
+
     void deallocate(void* ptr)
     {
         if (!ptr)
@@ -119,10 +197,7 @@ public:
             throw std::runtime_error("Double free detected");
         }
 
-        block->is_free = true;
-        insert_free_block(block);
-        merge_with_next(block);
-        merge_with_previous(block);
+        deallocate_block(block);
     }
 
     std::size_t get_free_memory() const noexcept
@@ -279,39 +354,8 @@ private:
     void* allocate_from_block(BlockHeader* prev, BlockHeader* curr, const AllocationLayout& layout,
                               std::size_t requested_size)
     {
-        const std::size_t header_size = sizeof(BlockHeader);
-        const std::size_t remaining_size = curr->size - layout.total_size;
-
-        if (remaining_size >= header_size + alignment)
-        {
-            BlockHeader* new_block =
-                reinterpret_cast<BlockHeader*>(reinterpret_cast<char*>(curr) + layout.total_size);
-            new_block->size = remaining_size;
-            new_block->is_free = true;
-            new_block->next_free = curr->next_free;
-
-            curr->size = layout.total_size;
-
-            if (prev)
-            {
-                prev->next_free = new_block;
-            }
-            else
-            {
-                free_list_head = new_block;
-            }
-        }
-        else
-        {
-            if (prev)
-            {
-                prev->next_free = curr->next_free;
-            }
-            else
-            {
-                free_list_head = curr->next_free;
-            }
-        }
+        remove_free_block(prev, curr);
+        split_allocated_block(curr, layout.total_size);
 
         curr->is_free = false;
         curr->next_free = nullptr;
@@ -329,7 +373,8 @@ private:
         BlockHeader* prev = nullptr;
         BlockHeader* curr = free_list_head.get();
 
-        while (curr != nullptr && curr < block)
+        while (curr != nullptr &&
+               (curr->size < block->size || (curr->size == block->size && curr < block)))
         {
             prev = curr;
             curr = curr->next_free.get();
@@ -347,44 +392,120 @@ private:
         }
     }
 
-    void merge_with_next(BlockHeader* block)
-    {
-        BlockHeader* curr = block->next_free.get();
-        if (curr == nullptr)
-        {
-            return;
-        }
-
-        char* block_end = reinterpret_cast<char*>(block) + block->size;
-        if (block_end == reinterpret_cast<char*>(curr))
-        {
-            block->size += curr->size;
-            block->next_free = curr->next_free;
-        }
-    }
-
-    void merge_with_previous(BlockHeader* block)
+    void remove_free_block(BlockHeader* target)
     {
         BlockHeader* prev = nullptr;
         BlockHeader* curr = free_list_head.get();
-
-        while (curr != nullptr && curr != block)
+        while (curr != nullptr)
         {
+            if (curr == target)
+            {
+                remove_free_block(prev, curr);
+                return;
+            }
             prev = curr;
             curr = curr->next_free.get();
         }
+    }
 
-        if (prev == nullptr)
+    void remove_free_block(BlockHeader* prev, BlockHeader* target)
+    {
+        if (prev != nullptr)
+        {
+            prev->next_free = target->next_free;
+        }
+        else
+        {
+            free_list_head = target->next_free;
+        }
+        target->next_free = nullptr;
+    }
+
+    void split_allocated_block(BlockHeader* block, std::size_t used_size)
+    {
+        const std::size_t remaining_size = block->size - used_size;
+        if (remaining_size < sizeof(BlockHeader) + alignment)
         {
             return;
         }
 
-        char* prev_end = reinterpret_cast<char*>(prev) + prev->size;
-        if (prev_end == reinterpret_cast<char*>(block))
+        BlockHeader* new_block =
+            reinterpret_cast<BlockHeader*>(reinterpret_cast<char*>(block) + used_size);
+        new_block->size = remaining_size;
+        new_block->is_free = true;
+        new_block->next_free = nullptr;
+
+        block->size = used_size;
+        insert_free_block(new_block);
+    }
+
+    void deallocate_block(BlockHeader* block)
+    {
+        block->is_free = true;
+        block->next_free = nullptr;
+
+        BlockHeader* next = physical_next(block);
+        if (next != nullptr && next->is_free)
         {
-            prev->size += block->size;
-            prev->next_free = block->next_free;
+            remove_free_block(next);
+            block->size += next->size;
         }
+
+        BlockHeader* prev = physical_previous(block);
+        if (prev != nullptr && prev->is_free)
+        {
+            remove_free_block(prev);
+            prev->size += block->size;
+            block = prev;
+        }
+
+        block->is_free = true;
+        block->next_free = nullptr;
+        insert_free_block(block);
+    }
+
+    BlockHeader* physical_next(BlockHeader* block) const noexcept
+    {
+        uintptr_t next_address = reinterpret_cast<uintptr_t>(block) + block->size;
+        if (next_address >= segment_end_address())
+        {
+            return nullptr;
+        }
+        return reinterpret_cast<BlockHeader*>(next_address);
+    }
+
+    BlockHeader* physical_previous(BlockHeader* block) const noexcept
+    {
+        uintptr_t target = reinterpret_cast<uintptr_t>(block);
+        uintptr_t current = reinterpret_cast<uintptr_t>(first_block.get());
+        BlockHeader* prev = nullptr;
+        std::size_t visited_blocks = 0;
+        const std::size_t max_blocks = segment_size / alignment + 1;
+
+        while (current < target)
+        {
+            BlockHeader* curr = reinterpret_cast<BlockHeader*>(current);
+            if (curr->size < sizeof(BlockHeader) || curr->size % alignment != 0)
+            {
+                return nullptr;
+            }
+
+            uintptr_t next = current + curr->size;
+            if (next <= current || next > target)
+            {
+                return nullptr;
+            }
+
+            prev = curr;
+            current = next;
+            ++visited_blocks;
+            if (visited_blocks > max_blocks)
+            {
+                return nullptr;
+            }
+        }
+
+        return current == target ? prev : nullptr;
     }
 
     uintptr_t segment_begin_address() const noexcept
