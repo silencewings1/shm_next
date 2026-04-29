@@ -1,7 +1,6 @@
 #pragma once
 
 #include "../offset_ptr.h"
-#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -259,7 +258,6 @@ public:
             throw std::runtime_error("Invalid shared memory deallocation pointer");
         }
 
-        assert(!block->is_free && "Double free detected");
         if (block->is_free)
         {
             throw std::runtime_error("Double free detected");

@@ -1,10 +1,10 @@
 #pragma once
 
-#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
 #include <limits>
+#include <stdexcept>
 #include <type_traits>
 
 namespace interprocess
@@ -19,15 +19,41 @@ template <typename To, typename From>
 using enable_offset_ptr_conversion_t =
     std::enable_if_t<std::is_convertible<From*, To*>::value, int>;
 
-inline int64_t make_offset(const void* self, const void* ptr) noexcept
+inline bool try_make_offset(const void* self, const void* ptr, int64_t& result) noexcept
 {
-    intptr_t self_addr = reinterpret_cast<intptr_t>(self);
-    intptr_t ptr_addr = reinterpret_cast<intptr_t>(ptr);
-    intptr_t diff = ptr_addr - self_addr;
-    assert(diff != offset_ptr_null && "OffsetPtr target address conflicts with null sentinel");
-    assert(diff >= static_cast<intptr_t>(std::numeric_limits<int64_t>::min()) &&
-           diff <= static_cast<intptr_t>(std::numeric_limits<int64_t>::max()));
-    return static_cast<int64_t>(diff);
+    const auto self_addr = reinterpret_cast<uintptr_t>(self);
+    const auto ptr_addr = reinterpret_cast<uintptr_t>(ptr);
+    constexpr auto max_offset = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+
+    if (ptr_addr >= self_addr)
+    {
+        const uint64_t diff = ptr_addr - self_addr;
+        if (diff > max_offset || diff == static_cast<uint64_t>(offset_ptr_null))
+        {
+            return false;
+        }
+        result = static_cast<int64_t>(diff);
+        return true;
+    }
+
+    const uint64_t diff = self_addr - ptr_addr;
+    if (diff > max_offset)
+    {
+        return false;
+    }
+    result = -static_cast<int64_t>(diff);
+    return true;
+}
+
+inline int64_t make_offset(const void* self, const void* ptr)
+{
+    int64_t result = offset_ptr_null;
+    if (!try_make_offset(self, ptr, result))
+    {
+        throw std::out_of_range(
+            "OffsetPtr target address is outside representable range or conflicts with null");
+    }
+    return result;
 }
 
 } // namespace detail
@@ -40,9 +66,13 @@ class OffsetPtr
 public:
     using pointer = T*;
     using reference = T&;
-    using difference_type = std::ptrdiff_t;
+    using element_type = T;
     using value_type = T;
+    using difference_type = std::ptrdiff_t;
     using iterator_category = std::random_access_iterator_tag;
+
+    template <typename U>
+    using rebind = OffsetPtr<U>;
 
     OffsetPtr() noexcept : offset(detail::offset_ptr_null)
     {
@@ -52,29 +82,35 @@ public:
     {
     }
 
-    OffsetPtr(T* ptr) noexcept
+    OffsetPtr(T* ptr)
     {
         set_pointer(ptr);
     }
 
-    OffsetPtr(const OffsetPtr& other) noexcept
+    OffsetPtr(const OffsetPtr& other)
     {
         set_pointer(other.get());
     }
 
     template <typename U, detail::enable_offset_ptr_conversion_t<T, U> = 0>
-    OffsetPtr(const OffsetPtr<U>& other) noexcept
+    OffsetPtr(const OffsetPtr<U>& other)
     {
         set_pointer(other.get());
     }
 
-    OffsetPtr& operator=(const OffsetPtr& other) noexcept
+    OffsetPtr& operator=(std::nullptr_t) noexcept
+    {
+        offset = detail::offset_ptr_null;
+        return *this;
+    }
+
+    OffsetPtr& operator=(const OffsetPtr& other)
     {
         set_pointer(other.get());
         return *this;
     }
 
-    OffsetPtr& operator=(T* ptr) noexcept
+    OffsetPtr& operator=(T* ptr)
     {
         set_pointer(ptr);
         return *this;
@@ -87,7 +123,7 @@ public:
         return reinterpret_cast<T*>(reinterpret_cast<char*>(const_cast<OffsetPtr*>(this)) + offset);
     }
 
-    void set_pointer(T* ptr) noexcept
+    void set_pointer(T* ptr)
     {
         if (!ptr)
         {
@@ -112,57 +148,57 @@ public:
         return get()[n];
     }
 
-    OffsetPtr& operator++() noexcept
+    OffsetPtr& operator++()
     {
         set_pointer(get() + 1);
         return *this;
     }
 
-    OffsetPtr operator++(int) noexcept
+    OffsetPtr operator++(int)
     {
         OffsetPtr tmp(*this);
         ++(*this);
         return tmp;
     }
 
-    OffsetPtr& operator--() noexcept
+    OffsetPtr& operator--()
     {
         set_pointer(get() - 1);
         return *this;
     }
 
-    OffsetPtr operator--(int) noexcept
+    OffsetPtr operator--(int)
     {
         OffsetPtr tmp(*this);
         --(*this);
         return tmp;
     }
 
-    OffsetPtr& operator+=(difference_type n) noexcept
+    OffsetPtr& operator+=(difference_type n)
     {
         set_pointer(get() + n);
         return *this;
     }
 
-    OffsetPtr& operator-=(difference_type n) noexcept
+    OffsetPtr& operator-=(difference_type n)
     {
         set_pointer(get() - n);
         return *this;
     }
 
-    friend OffsetPtr operator+(OffsetPtr lhs, difference_type rhs) noexcept
+    friend OffsetPtr operator+(OffsetPtr lhs, difference_type rhs)
     {
         lhs += rhs;
         return lhs;
     }
 
-    friend OffsetPtr operator+(difference_type lhs, OffsetPtr rhs) noexcept
+    friend OffsetPtr operator+(difference_type lhs, OffsetPtr rhs)
     {
         rhs += lhs;
         return rhs;
     }
 
-    friend OffsetPtr operator-(OffsetPtr lhs, difference_type rhs) noexcept
+    friend OffsetPtr operator-(OffsetPtr lhs, difference_type rhs)
     {
         lhs -= rhs;
         return lhs;
@@ -213,8 +249,12 @@ class OffsetPtr<void>
 {
 public:
     using pointer = void*;
-    using difference_type = std::ptrdiff_t;
+    using element_type = void;
     using value_type = void;
+    using difference_type = std::ptrdiff_t;
+
+    template <typename U>
+    using rebind = OffsetPtr<U>;
 
     OffsetPtr() noexcept : offset(detail::offset_ptr_null)
     {
@@ -222,30 +262,41 @@ public:
     OffsetPtr(std::nullptr_t) noexcept : offset(detail::offset_ptr_null)
     {
     }
-    OffsetPtr(void* ptr) noexcept
+    OffsetPtr(void* ptr)
     {
         set_pointer(ptr);
     }
 
-    template <typename U>
-    OffsetPtr(U* ptr) noexcept
-    {
-        set_pointer(ptr);
-    }
-
-    template <typename U>
-    OffsetPtr(const OffsetPtr<U>& other) noexcept
+    OffsetPtr(const OffsetPtr& other)
     {
         set_pointer(other.get());
     }
 
-    OffsetPtr& operator=(void* ptr) noexcept
+    template <typename U>
+    OffsetPtr(U* ptr)
+    {
+        set_pointer(ptr);
+    }
+
+    template <typename U>
+    OffsetPtr(const OffsetPtr<U>& other)
+    {
+        set_pointer(other.get());
+    }
+
+    OffsetPtr& operator=(std::nullptr_t) noexcept
+    {
+        offset = detail::offset_ptr_null;
+        return *this;
+    }
+
+    OffsetPtr& operator=(void* ptr)
     {
         set_pointer(ptr);
         return *this;
     }
 
-    OffsetPtr& operator=(const OffsetPtr& other) noexcept
+    OffsetPtr& operator=(const OffsetPtr& other)
     {
         set_pointer(other.get());
         return *this;
@@ -258,7 +309,7 @@ public:
         return reinterpret_cast<char*>(const_cast<OffsetPtr*>(this)) + offset;
     }
 
-    void set_pointer(void* ptr) noexcept
+    void set_pointer(void* ptr)
     {
         if (!ptr)
         {
@@ -296,8 +347,12 @@ class OffsetPtr<const void>
 {
 public:
     using pointer = const void*;
-    using difference_type = std::ptrdiff_t;
+    using element_type = const void;
     using value_type = const void;
+    using difference_type = std::ptrdiff_t;
+
+    template <typename U>
+    using rebind = OffsetPtr<U>;
 
     OffsetPtr() noexcept : offset(detail::offset_ptr_null)
     {
@@ -305,30 +360,41 @@ public:
     OffsetPtr(std::nullptr_t) noexcept : offset(detail::offset_ptr_null)
     {
     }
-    OffsetPtr(const void* ptr) noexcept
+    OffsetPtr(const void* ptr)
     {
         set_pointer(ptr);
     }
 
+    OffsetPtr(const OffsetPtr& other)
+    {
+        set_pointer(other.get());
+    }
+
     template <typename U>
-    OffsetPtr(const U* ptr) noexcept
+    OffsetPtr(const U* ptr)
     {
         set_pointer(ptr);
     }
 
     template <typename U, detail::enable_offset_ptr_conversion_t<const void, U> = 0>
-    OffsetPtr(const OffsetPtr<U>& other) noexcept
+    OffsetPtr(const OffsetPtr<U>& other)
     {
         set_pointer(other.get());
     }
 
-    OffsetPtr& operator=(const void* ptr) noexcept
+    OffsetPtr& operator=(std::nullptr_t) noexcept
+    {
+        offset = detail::offset_ptr_null;
+        return *this;
+    }
+
+    OffsetPtr& operator=(const void* ptr)
     {
         set_pointer(ptr);
         return *this;
     }
 
-    OffsetPtr& operator=(const OffsetPtr& other) noexcept
+    OffsetPtr& operator=(const OffsetPtr& other)
     {
         set_pointer(other.get());
         return *this;
@@ -341,7 +407,7 @@ public:
         return reinterpret_cast<const char*>(this) + offset;
     }
 
-    void set_pointer(const void* ptr) noexcept
+    void set_pointer(const void* ptr)
     {
         if (!ptr)
         {

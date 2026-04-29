@@ -100,6 +100,19 @@ int run_read_only_child(const char* shm_name)
         {
             return 1;
         }
+        if (!require(throws_runtime_error([&] { (void)segment.find_read_only<int>("RootObject"); }),
+                     "read-only find should reject mismatched named object type"))
+        {
+            return 1;
+        }
+        if (!require(throws_runtime_error([&] {
+                         std::size_t count = 0;
+                         (void)segment.find_array_read_only<int>("RootObject", &count);
+                     }),
+                     "read-only find_array should reject mismatched named object type"))
+        {
+            return 1;
+        }
         if (!require(segment.get_free_memory() > 0, "read-only free memory should be observable"))
         {
             return 1;

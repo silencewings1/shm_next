@@ -2,6 +2,32 @@ cmake_minimum_required(VERSION 3.20)
 
 project(shm_next VERSION 0.1.0 LANGUAGES CXX)
 
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING
+        "Choose the build type"
+        FORCE
+    )
+else()
+    string(TOUPPER "${CMAKE_BUILD_TYPE}" SHM_NEXT_BUILD_TYPE_UPPER)
+    if(SHM_NEXT_BUILD_TYPE_UPPER STREQUAL "DEBUG")
+        set(CMAKE_BUILD_TYPE Debug CACHE STRING
+            "Choose the build type"
+            FORCE
+        )
+    elseif(SHM_NEXT_BUILD_TYPE_UPPER STREQUAL "RELEASE")
+        set(CMAKE_BUILD_TYPE Release CACHE STRING
+            "Choose the build type"
+            FORCE
+        )
+    else()
+        message(FATAL_ERROR
+            "Unsupported CMAKE_BUILD_TYPE='${CMAKE_BUILD_TYPE}'. Use Debug or Release."
+        )
+    endif()
+endif()
+
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

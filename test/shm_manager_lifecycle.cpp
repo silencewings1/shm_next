@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <sys/wait.h>
@@ -19,6 +20,11 @@ static_assert(std::is_constructible<OffsetPtr<const int>, OffsetPtr<int>>::value
               "OffsetPtr should allow non-const to const conversion");
 static_assert(!std::is_constructible<OffsetPtr<int>, OffsetPtr<const int>>::value,
               "OffsetPtr should reject const to non-const conversion");
+using OffsetIntTraits = std::pointer_traits<OffsetPtr<int>>;
+static_assert(std::is_same<OffsetIntTraits::element_type, int>::value,
+              "OffsetPtr should expose pointer_traits element_type");
+static_assert(std::is_same<OffsetIntTraits::rebind<const int>, OffsetPtr<const int>>::value,
+              "OffsetPtr should support pointer_traits rebind");
 
 namespace
 {
@@ -101,6 +107,23 @@ bool require(bool condition, const char* message)
         return false;
     }
     return true;
+}
+
+template <typename Exception, typename Func>
+bool throws_exception(Func&& func)
+{
+    try
+    {
+        func();
+    }
+    catch (const Exception&)
+    {
+        return true;
+    }
+    catch (...)
+    {
+    }
+    return false;
 }
 
 bool test_abandoned_construction_cleanup()
@@ -388,6 +411,15 @@ int main()
             ManagedSharedMemory::remove(shm_name);
             return 1;
         }
+        OffsetPtr<char> sentinel_offset;
+        if (!require(throws_exception<std::out_of_range>([&] {
+                         sentinel_offset.set_pointer(reinterpret_cast<char*>(&sentinel_offset) + 1);
+                     }),
+                     "OffsetPtr should reject null sentinel offset"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
 
         std::atomic<bool> entered{false};
         std::atomic<bool> finish{false};
@@ -487,6 +519,50 @@ int main()
             ManagedSharedMemory::remove(shm_name);
             return 1;
         }
+        if (!require(throws_exception<std::runtime_error>(
+                         [&] { (void)segment.find<double>("FindOrConstruct"); }),
+                     "find with a mismatched named object type should throw"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        if (!require(throws_exception<std::runtime_error>([&] {
+                         std::size_t typed_count = 0;
+                         (void)segment.find_array<double>("FindOrConstruct", &typed_count);
+                     }),
+                     "find_array with a mismatched named object type should throw"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        if (!require(throws_exception<std::runtime_error>(
+                         [&] { (void)segment.find_or_construct<double>("FindOrConstruct", 1.0); }),
+                     "find_or_construct with a mismatched named object type should throw"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        if (!require(throws_exception<std::runtime_error>(
+                         [&] { (void)segment.destroy<double>("FindOrConstruct"); }),
+                     "destroy with a mismatched named object type should throw"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        if (!require(throws_exception<std::runtime_error>([&] {
+                         (void)segment.destroy_ptr(reinterpret_cast<double*>(first_value));
+                     }),
+                     "destroy_ptr with a mismatched named object type should throw"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
+        if (!require(segment.find<int>("FindOrConstruct") == first_value,
+                     "type mismatch checks should leave the named object intact"))
+        {
+            ManagedSharedMemory::remove(shm_name);
+            return 1;
+        }
 
         std::size_t visited_named_objects = 0;
         segment.for_each_named_object(
@@ -516,6 +592,24 @@ int main()
             if (!require(read_only_segment.get_num_named_objects() ==
                              segment.get_num_named_objects(),
                          "read-only named object count mismatch"))
+            {
+                ManagedSharedMemory::remove(shm_name);
+                return 1;
+            }
+            if (!require(throws_exception<std::runtime_error>([&] {
+                             (void)read_only_segment.find_read_only<double>("FindOrConstruct");
+                         }),
+                         "read-only find with a mismatched named object type should throw"))
+            {
+                ManagedSharedMemory::remove(shm_name);
+                return 1;
+            }
+            if (!require(throws_exception<std::runtime_error>([&] {
+                             std::size_t read_only_count = 0;
+                             (void)read_only_segment.find_array_read_only<double>("FindOrConstruct",
+                                                                                  &read_only_count);
+                         }),
+                         "read-only find_array with a mismatched named object type should throw"))
             {
                 ManagedSharedMemory::remove(shm_name);
                 return 1;

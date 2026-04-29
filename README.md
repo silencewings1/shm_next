@@ -1,310 +1,583 @@
 # shm_next
 
-`interprocess/` 提供了一套基于 POSIX shared memory 的轻量级跨进程数据共享组件。它的目标不是完整复刻 Boost.Interprocess，而是在当前工程中提供一组可直接使用的共享内存对象管理、分配器、容器和同步原语。
+`shm_next` 是一个不依赖 Boost 的轻量级 POSIX shared memory 组件集。它参考了 Boost.Interprocess 的核心模型，但只保留当前工程需要的能力：共享内存段管理、段内分配器、命名对象、共享内存友好容器和跨进程同步原语。
+
+当前实现适合用来在多个进程之间共享 C++ 对象、字符串、顺序容器、有序 map 和自定义根对象。容器本身不内建业务锁，调用方需要用共享内存中的 `InterprocessMutex` 或其他同步原语保护并发读写。
+
+## 核心能力
+
+- POSIX shared memory RAII 封装：`shm_open`、`ftruncate`、`mmap`、`munmap`、`shm_unlink`。
+- 管理型共享内存入口：`ManagedSharedMemory` 支持 `create_only`、`open_only`、`open_or_create`、`open_read_only`。
+- 段内分配器：`SharedMemoryManager` + `SharedMemoryAllocator<T>`。
+- 命名对象：`construct`、`find`、`find_or_construct`、数组构造、`destroy`、`destroy_ptr`。
+- 共享内存容器：`SharedMemoryString`、`SharedMemoryVector<T>`、`SharedMemoryMap<K,V>`。
+- 跨进程同步：mutex、condition、semaphore，mutex 在支持的平台启用 robust owner-dead 语义。
+- 稳健性检查：allocator sanity、double-free 检测、非法指针检测、初始化状态机、崩溃构造清理。
+- 性能辅助：`allocate_many`、`deallocate_many`、`try_expand`、vector/string 原地扩容、map node cache。
+- CTest 覆盖：基础同步、生命周期、崩溃恢复、只读快照、多进程并发和 allocator 碎片场景。
 
 ## 目录结构
 
-### `allocator/`
-
-这一层负责共享内存内存模型本身。
-
-- `offset_ptr.h`
-  - 定义 `OffsetPtr<T>`，使用“相对偏移”而不是绝对地址保存指针。
-  - 这是跨进程访问的关键，因为不同进程映射同一段共享内存时，虚拟地址通常不同。
-- `shared_memory_allocator.h`
-  - 定义 `SharedMemoryAllocator<T>`。
-  - 它把容器的元素分配转发给 `SharedMemoryManager`，让对象真正落在共享内存里。
-- `shared_memory_manager.h`
-  - 定义 `SharedMemoryManager`。
-  - 它位于共享内存段开头，协调内部 block allocator 和 named object registry，负责分配/释放内存，以及按名字构造、查找和销毁对象。
-- `detail/`
-  - 放置 allocator 内部实现，包括 block allocator 和 named object registry。
-
-### `container/`
-
-这一层提供建立在共享内存分配器之上的容器。
-
-- `shared_memory_string.h`
-  - 提供 `BasicSharedMemoryString` / `SharedMemoryString`。
-  - 适合在共享内存中保存字符串，并支持跨进程访问。
-- `shared_memory_vector.h`
-  - 提供 `SharedMemoryVector<T>`。
-  - 接口风格接近 `std::vector`，内部使用共享内存 allocator。
-- `shared_memory_map.h`
-  - 提供 `SharedMemoryMap<Key, T, Compare>`。
-  - 接口风格接近 `std::map`，内部使用 `container/detail/` 下的红黑树实现保存键值对，支持有序遍历、查找、插入、删除等操作。
-
-### `ipc/`
-
-这一层负责 POSIX 共享内存对象和映射生命周期。
-
-- `posix_shared_memory_object.h`
-  - 对 `shm_open`、`ftruncate`、`shm_unlink` 做了 RAII 封装。
-- `posix_mapped_region.h`
-  - 对 `mmap` / `munmap` 做了 RAII 封装。
-- `managed_shared_memory.h`
-  - 当前项目最常用的入口。
-  - 它把共享内存对象、映射区域、`SharedMemoryManager` 组合起来，提供：
-    - 创建或打开共享内存段
-    - 获取 `SharedMemoryAllocator<T>`
-    - `construct<T>(name, ...)`
-    - `find<T>(name)`
-    - `destroy<T>(name)`
-    - 查询剩余内存
-
-### `sync/`
-
-这一层提供跨进程同步原语。
-
-- `posix_mutex.h`
-  - `InterprocessMutex`
-  - 基于 `pthread_mutex_t`，使用 `PTHREAD_PROCESS_SHARED`，可在多个进程间共享。
-  - 在支持 `PTHREAD_MUTEX_ROBUST` 的平台上会启用 robust mutex，并在 owner-dead 后自动 mark consistent，避免其他进程永久阻塞。
-- `posix_condition.h`
-  - `InterprocessCondition`
-  - 基于 `pthread_cond_t`，可与 `InterprocessMutex` 配合使用。
-- `posix_semaphore.h`
-  - `InterprocessSemaphore`
-  - 使用 mutex + condition 实现计数信号量。
-
-### `interprocess.cpp`
-
-静态库锚点文件。它通过包含公共头文件，保证这些头文件被库目标统一导出，并作为 `shm_next_interprocess` 静态库的编译单元存在。
-
-## 核心设计
-
-## 流程图
-
-### 1. 模块关系图
-
-下面这张图描述了 `interprocess/` 内各层之间的依赖关系：
-
-```mermaid
-flowchart TD
-    A["业务代码 / 测试程序"] --> B["ipc/managed_shared_memory.h<br/>ManagedSharedMemory"]
-    B --> C["ipc/posix_shared_memory_object.h<br/>SharedMemoryObject"]
-    B --> D["ipc/posix_mapped_region.h<br/>MappedRegion"]
-    B --> E["allocator/shared_memory_manager.h<br/>SharedMemoryManager"]
-    B --> F["allocator/shared_memory_allocator.h<br/>SharedMemoryAllocator<T>"]
-
-    G["container/shared_memory_string.h<br/>SharedMemoryString"] --> F
-    H["container/shared_memory_vector.h<br/>SharedMemoryVector<T>"] --> F
-    I["container/shared_memory_map.h<br/>SharedMemoryMap<K,V>"] --> F
-
-    E --> J["allocator/offset_ptr.h<br/>OffsetPtr<T>"]
-    G --> J
-    H --> J
-    I --> J
-
-    K["sync/posix_mutex.h<br/>InterprocessMutex"] --> L["pthread process-shared primitives"]
-    M["sync/posix_condition.h<br/>InterprocessCondition"] --> L
-    N["sync/posix_semaphore.h<br/>InterprocessSemaphore"] --> L
-
-    C --> O["POSIX shared memory"]
-    D --> P["mmap / munmap"]
+```text
+interprocess/
+  allocator/
+    offset_ptr.h
+    shared_memory_allocator.h
+    shared_memory_manager.h
+    detail/
+      named_object_registry.h
+      shared_memory_block_allocator.h
+  container/
+    shared_memory_string.h
+    shared_memory_vector.h
+    shared_memory_map.h
+    detail/shared_memory_rbtree_map.h
+  ipc/
+    managed_shared_memory.h
+    posix_mapped_region.h
+    posix_shared_memory_object.h
+  sync/
+    posix_mutex.h
+    posix_condition.h
+    posix_semaphore.h
+test/
+  shm_* test and sample programs
 ```
 
-### 2. 共享内存创建与访问流程
+## 类图与流程图
 
-下面这张图对应最典型的 producer / consumer 用法：
+### 核心类关系
 
 ```mermaid
-sequenceDiagram
-    participant Producer
-    participant ManagedSHM as ManagedSharedMemory
-    participant ShmObj as SharedMemoryObject
-    participant Region as MappedRegion
-    participant Manager as SharedMemoryManager
-    participant Consumer
+classDiagram
+    class ManagedSharedMemory {
+        +construct_T(name, args)
+        +find_T(name)
+        +find_read_only_T(name)
+        +destroy_T(name)
+        +get_allocator_T()
+        +grow(name, extra_bytes)
+        +shrink_to_fit(name)
+    }
 
-    Producer->>ManagedSHM: create_only(name, size)
-    ManagedSHM->>ShmObj: shm_open + ftruncate
-    ManagedSHM->>Region: mmap
-    ManagedSHM->>Manager: create(base_addr, total_size)
-    Producer->>ManagedSHM: get_allocator<T>()
-    Producer->>ManagedSHM: construct<RootObject>("RootObject", ...)
-    ManagedSHM->>Manager: construct(name, ...)
-    Manager-->>Producer: RootObject*
+    class SharedMemoryObject {
+        +truncate(size)
+        +get_size()
+        +remove(name)
+    }
 
-    Consumer->>ManagedSHM: open_only(name)
-    ManagedSHM->>ShmObj: shm_open
-    ManagedSHM->>Region: mmap
-    ManagedSHM->>Manager: attach(base_addr)
-    Consumer->>ManagedSHM: find<RootObject>("RootObject")
-    ManagedSHM->>Manager: find(name)
-    Manager-->>Consumer: RootObject*
+    class MappedRegion {
+        +get_address()
+        +get_size()
+        +flush()
+    }
+
+    class SharedMemoryManager {
+        +allocate(size, alignment)
+        +deallocate(ptr)
+        +construct_T(name, args)
+        +find_T(name)
+        +destroy_T(name)
+        +check_sanity()
+    }
+
+    class SharedMemoryBlockAllocator {
+        +allocate(size, alignment)
+        +deallocate(ptr)
+        +allocate_many()
+        +try_expand()
+        +check_sanity()
+    }
+
+    class NamedObjectRegistry {
+        +insert(header)
+        +find_ready(name)
+        +unlink(header)
+        +reserve(count)
+    }
+
+    class SharedMemoryAllocator {
+        +allocate(n)
+        +deallocate(ptr, n)
+        +try_expand(ptr, old_count, new_count)
+    }
+
+    class OffsetPtr {
+        +get()
+        +set_pointer(ptr)
+    }
+
+    class SharedMemoryString
+    class SharedMemoryVector
+    class SharedMemoryMap
+    class InterprocessMutex
+    class InterprocessCondition
+    class InterprocessSemaphore
+
+    ManagedSharedMemory *-- SharedMemoryObject
+    ManagedSharedMemory *-- MappedRegion
+    ManagedSharedMemory o-- SharedMemoryManager
+    SharedMemoryManager *-- SharedMemoryBlockAllocator
+    SharedMemoryManager *-- NamedObjectRegistry
+    SharedMemoryAllocator --> SharedMemoryManager
+    SharedMemoryString --> SharedMemoryAllocator
+    SharedMemoryVector --> SharedMemoryAllocator
+    SharedMemoryMap --> SharedMemoryAllocator
+    SharedMemoryString *-- OffsetPtr
+    SharedMemoryVector *-- OffsetPtr
+    SharedMemoryMap *-- OffsetPtr
+    SharedMemoryManager *-- InterprocessMutex
+    InterprocessCondition --> InterprocessMutex
+    InterprocessSemaphore *-- InterprocessMutex
+    InterprocessSemaphore *-- InterprocessCondition
 ```
 
-### 3. 共享对象内部的数据流
-
-下面这张图描述共享内存中对象和容器的典型关系：
+### 共享内存段内布局
 
 ```mermaid
 flowchart LR
-    A["Shared memory segment"] --> B["SharedMemoryManager"]
-    A --> C["Named object table"]
-    C --> D["RootObject"]
+    Segment["POSIX shared memory segment"] --> Header["SharedMemoryManager"]
+    Header --> Mutex["manager mutex"]
+    Header --> Allocator["SharedMemoryBlockAllocator"]
+    Header --> Registry["NamedObjectRegistry"]
 
-    D --> E["InterprocessMutex"]
-    D --> F["SharedMemoryString"]
-    D --> G["SharedMemoryVector<T>"]
-    D --> H["SharedMemoryMap<Key, Value>"]
+    Registry --> NameA["NamedObjectHeader: RootObject"]
+    NameA --> Root["RootObject storage"]
+    Root --> UserMutex["InterprocessMutex"]
+    Root --> String["SharedMemoryString"]
+    Root --> Vector["SharedMemoryVector"]
+    Root --> Map["SharedMemoryMap"]
 
-    F --> I["char buffer in shared memory"]
-    G --> J["element buffer in shared memory"]
-    H --> K["RB-tree nodes in shared memory"]
+    Allocator --> Blocks["allocated/free blocks"]
+    Blocks --> StringBuffer["string buffer"]
+    Blocks --> VectorBuffer["vector element buffer"]
+    Blocks --> MapNodes["map tree nodes"]
 
-    B --> I
-    B --> J
-    B --> K
-
-    I -. offset .-> L["OffsetPtr"]
-    J -. offset .-> L
-    K -. offset .-> L
+    StringBuffer -. "OffsetPtr" .-> String
+    VectorBuffer -. "OffsetPtr" .-> Vector
+    MapNodes -. "OffsetPtr" .-> Map
 ```
 
-### 4. 带锁访问共享容器的建议流程
-
-当前容器本身不持锁，推荐由调用方在共享根对象上持有一个 `InterprocessMutex`：
+### 创建、打开与只读快照流程
 
 ```mermaid
 sequenceDiagram
-    participant P1 as Process A
-    participant M as InterprocessMutex
-    participant Root as RootObject
-    participant Map as SharedMemoryMap / Vector / String
-    participant P2 as Process B
+    participant P as Producer
+    participant M as ManagedSharedMemory
+    participant S as SharedMemoryObject
+    participant R as MappedRegion
+    participant SM as SharedMemoryManager
+    participant C as Consumer
+    participant RO as ReadOnlyConsumer
 
-    P1->>M: lock()
-    P1->>Root: 访问共享根对象
-    P1->>Map: insert / erase / find / assign
-    P1->>M: unlock()
+    P->>M: create_only(name, size)
+    M->>S: shm_open(O_CREAT | O_EXCL)
+    M->>S: truncate(size)
+    M->>R: mmap(read_write)
+    M->>SM: create(base, size)
+    P->>M: construct RootObject as "RootObject"
+    M->>SM: allocate + register named object
 
-    P2->>M: lock()
-    P2->>Root: 读取或更新共享数据
-    P2->>Map: find / iterate / modify
-    P2->>M: unlock()
+    C->>M: open_only(name)
+    M->>S: shm_open(O_RDWR)
+    M->>R: mmap(read_write)
+    M->>SM: attach(base)
+    M->>SM: recover_abandoned_named_objects()
+    C->>M: find RootObject by name
+
+    RO->>M: open_read_only(name)
+    M->>S: shm_open(O_RDONLY)
+    M->>R: mmap(read_only)
+    M->>SM: attach(base)
+    RO->>M: find_read_only RootObject by name
 ```
 
-### 1. 为什么使用 `OffsetPtr`
+### 命名对象生命周期
 
-共享内存中的普通裸指针在不同进程里通常不可直接复用，因为映射基地址可能不同。  
-`OffsetPtr<T>` 保存的是“当前对象地址到目标对象地址的偏移量”，因此同一块共享内存被多个进程映射后，仍然可以正确解析指向的对象。
+```mermaid
+stateDiagram-v2
+    [*] --> Reserving: construct/find_or_construct
+    Reserving --> Constructing: allocate object/header/name
+    Constructing --> Ready: constructor succeeds
+    Constructing --> Removed: constructor throws
+    Constructing --> Removed: owner process dies and attach recovers
+    Ready --> Found: find/find_array
+    Found --> Ready
+    Ready --> Destroying: destroy/destroy_ptr
+    Destroying --> Removed: destructor + deallocate
+    Removed --> [*]
+```
 
-### 2. 为什么容器要使用自定义 allocator
+### 段内分配与释放流程
 
-如果容器内部仍使用普通堆内存分配，那么只有容器对象本身在共享内存里，内部元素仍在进程私有地址空间中，跨进程访问就会失效。  
-`SharedMemoryAllocator<T>` 保证容器节点、字符串缓冲区、vector 元素等都由共享内存管理器分配。
+```mermaid
+flowchart TD
+    A["allocate(size, alignment)"] --> B["lock manager mutex"]
+    B --> C["normalize alignment"]
+    C --> D["scan size-sorted free list"]
+    D --> E{"free block fits?"}
+    E -- "no" --> F["throw bad_alloc"]
+    E -- "yes" --> G["remove free block"]
+    G --> H{"remaining space enough?"}
+    H -- "yes" --> I["split tail into new free block"]
+    H -- "no" --> J["use whole block"]
+    I --> K["write AllocationHeader"]
+    J --> K
+    K --> L["unlock and return payload"]
 
-### 3. 同步策略
+    M["deallocate(ptr)"] --> N["lock manager mutex"]
+    N --> O["validate pointer and allocation header"]
+    O --> P{"already free?"}
+    P -- "yes" --> Q["throw double-free error"]
+    P -- "no" --> R["mark block free"]
+    R --> S["merge physical next/previous free blocks"]
+    S --> T["insert into size-sorted free list"]
+    T --> U["unlock"]
+```
 
-当前容器本身不内建锁。  
-`SharedMemoryString`、`SharedMemoryVector`、`SharedMemoryMap` 都默认由调用方负责同步，通常做法是在共享根对象里放一个 `InterprocessMutex`，访问共享数据前显式加锁。
+### Robust Mutex 恢复流程
 
-## 典型使用方式
+```mermaid
+flowchart TD
+    A["manager operation"] --> B["lock_with_recovery_status"]
+    B --> C{"status"}
+    C -- "acquired" --> D["execute operation"]
+    C -- "owner_dead" --> E["check_sanity_unlocked"]
+    E --> F{"allocator and manager sane?"}
+    F -- "yes" --> G["mark_consistent"]
+    G --> D
+    F -- "no" --> H["unlock and throw"]
+    D --> I["unlock"]
+```
 
-最常见的入口是 `ManagedSharedMemory`：
+### 静态 Grow / Shrink 流程
+
+```mermaid
+flowchart TD
+    A["ManagedSharedMemory::grow(name, extra)"] --> B["open shm read_write"]
+    B --> C["try truncate to aligned new file size"]
+    C --> D{"platform accepts resize?"}
+    D -- "no" --> E["return false without metadata change"]
+    D -- "yes" --> F["mmap read_write"]
+    F --> G["attach manager"]
+    G --> H["block_allocator.grow(new_size)"]
+    H --> I{"metadata updated?"}
+    I -- "yes" --> J["return true"]
+    I -- "no" --> K["truncate back if possible; return false"]
+
+    L["ManagedSharedMemory::shrink_to_fit(name)"] --> M["open and mmap read_write"]
+    M --> N["manager.shrink_to_fit metadata"]
+    N --> O["try truncate file down"]
+    O --> P{"truncate succeeds?"}
+    P -- "yes" --> Q["return true"]
+    P -- "no" --> R["rollback metadata with grow_to_size; return false"]
+```
+
+## 主要模块
+
+### `OffsetPtr<T>`
+
+共享内存里的普通裸指针不能安全跨进程复用，因为不同进程映射同一段共享内存时，虚拟地址通常不同。
+
+`OffsetPtr<T>` 保存的是“指针对象自身地址到目标对象地址的相对偏移”。只要对象之间的相对位置不变，不同进程即使映射基址不同，也能重新计算出正确地址。
+
+当前 `OffsetPtr` 已限制 const 转换方向，提供基础 pointer traits / rebind，并把 null sentinel 冲突和不可表示偏移从 debug 断言提升为运行时异常。
+
+### `SharedMemoryManager`
+
+`SharedMemoryManager` 放在共享内存段开头，负责：
+
+- 初始化状态管理：`uninitialized`、`initializing`、`initialized`、`corrupted`。
+- 段内内存分配和释放。
+- 命名对象注册、查找、销毁。
+- allocator sanity 检查和内存统计。
+- abandoned constructing object 清理。
+- segment grow/shrink 的元数据更新。
+
+所有修改元数据的路径都通过 manager 内部 mutex 串行化。mutex owner-dead 后会先做 sanity check，再决定是否恢复。
+
+### `SharedMemoryBlockAllocator`
+
+段内 allocator 使用 block header 管理空闲块，空闲链表按大小排序，偏向 best-fit 行为。它支持：
+
+- 对齐分配。
+- 分裂和合并空闲块。
+- `allocate_many` / `deallocate_many`。
+- `try_expand`，让 vector/string 在相邻空间可用时原地扩容。
+- `check_sanity`、`all_memory_deallocated`、`zero_free_memory`。
+- 静态 segment grow/shrink 时扩展或裁剪尾部空闲块。
+
+当前实现仍是轻量版本，不是 Boost 的完整 `rbtree_best_fit`。如果需要更强的规模化分配性能，下一步可以引入边界标签、末尾哨兵和树形空闲索引。
+
+### 命名对象 registry
+
+命名对象 registry 保存名字、对象地址、实例数量、对象大小、类型指纹、状态和 owner pid。
+
+已支持：
+
+- 动态长度名称，不再截断固定长度。
+- hash bucket 加速查询。
+- `find_or_construct`。
+- `find<T>` / `find_array<T>` / `find_or_construct<T>` / `destroy<T>` / `destroy_ptr<T>` 的类型校验。
+- 数组构造和失败回滚。
+- `destroy_ptr`。
+- attach 时清理已死亡进程留下的 constructing/destroying 条目。
+- `reserve_named_objects` / `shrink_to_fit_indexes` 的接口。
+
+注意：当前 reserve/shrink 主要是接口和统计语义，底层 bucket 仍是固定数量；它不是 Boost 那种真正预分配索引节点的实现。
+
+### `ManagedSharedMemory`
+
+`ManagedSharedMemory` 是最常用入口，组合了 `SharedMemoryObject`、`MappedRegion` 和 `SharedMemoryManager`。
+
+支持的打开方式：
 
 ```cpp
-#include "interprocess/ipc/managed_shared_memory.h"
+ManagedSharedMemory segment(create_only, "demo", 64 * 1024);
+ManagedSharedMemory segment(open_only, "demo");
+ManagedSharedMemory segment(open_or_create, "demo", 64 * 1024);
+ManagedSharedMemory segment(open_read_only, "demo");
+```
+
+只读映射只能使用只读 API，例如：
+
+```cpp
+ManagedSharedMemory snapshot(open_read_only, "demo");
+const RootObject* root = snapshot.find_read_only<RootObject>("RootObject");
+```
+
+在只读映射上调用 `construct`、`find`、`destroy`、`get_allocator`、可写 manager accessor 会抛出异常，避免误写只读 mmap。
+
+### 同步原语
+
+`InterprocessMutex` 基于 `pthread_mutex_t`，使用 `PTHREAD_PROCESS_SHARED`。
+
+已支持：
+
+- `lock` / `try_lock` / `unlock`。
+- `try_lock_for` / `try_lock_until` / `timed_lock`。
+- `lock_with_recovery_status` / `try_lock_with_recovery_status`。
+- Linux robust mutex owner-dead 检测和 `mark_consistent`。
+
+`InterprocessCondition` 基于 `pthread_cond_t`，`InterprocessSemaphore` 基于 mutex + condition 实现。
+
+## 基本用法
+
+### Producer
+
+```cpp
 #include "interprocess/container/shared_memory_string.h"
+#include "interprocess/ipc/managed_shared_memory.h"
+#include "interprocess/sync/posix_mutex.h"
 
 using namespace interprocess;
 
 struct RootObject
 {
+    InterprocessMutex mutex;
     SharedMemoryString message;
 
-    explicit RootObject(const SharedMemoryAllocator<char>& alloc)
-        : message(alloc)
+    explicit RootObject(const SharedMemoryAllocator<char>& char_allocator)
+        : message(char_allocator)
     {
     }
 };
 
 int main()
 {
+    ManagedSharedMemory::remove("demo_segment");
+
     ManagedSharedMemory segment(create_only, "demo_segment", 64 * 1024);
     RootObject* root =
         segment.construct<RootObject>("RootObject", segment.get_allocator<char>());
 
+    root->mutex.lock();
     root->message = "hello shared memory";
+    root->mutex.unlock();
 }
 ```
 
-在 consumer 进程中：
+### Consumer
 
 ```cpp
-ManagedSharedMemory segment(open_only, "demo_segment");
-RootObject* root = segment.find<RootObject>("RootObject");
+#include "interprocess/container/shared_memory_string.h"
+#include "interprocess/ipc/managed_shared_memory.h"
+
+using namespace interprocess;
+
+int main()
+{
+    ManagedSharedMemory segment(open_only, "demo_segment");
+    RootObject* root = segment.find<RootObject>("RootObject");
+
+    root->mutex.lock();
+    const char* text = root->message.c_str();
+    (void)text;
+    root->mutex.unlock();
+}
 ```
 
-对象不再需要时可以显式销毁：
+### 只读快照
 
 ```cpp
-segment.destroy<RootObject>("RootObject");
+ManagedSharedMemory snapshot(open_read_only, "demo_segment");
+const RootObject* root = snapshot.find_read_only<RootObject>("RootObject");
 ```
 
-## 当前已覆盖的能力
+只读模式不会锁 manager mutex，因为锁本身会写入共享内存。manager 会通过 metadata generation 检测只读 attach 和只读查询过程中是否遇到并发元数据修改；如果检测到不稳定，会重试或抛出异常。它仍然不替代业务对象内容的并发同步。
 
-- 命名对象构造、查找与销毁
-- 共享内存字符串
-- 共享内存向量
-- 共享内存有序 map
-- 跨进程 mutex / condition / semaphore
-- producer / consumer 风格示例测试
+## 对象生命周期
 
-## 测试文件参考
+创建单个对象：
 
-`test/` 目录下已经有一组示例程序，可以作为使用参考：
+```cpp
+auto* value = segment.construct<int>("Answer", 42);
+```
 
-- `shm_string_producer.cpp` / `shm_string_consumer.cpp`
-- `shm_vector_producer.cpp` / `shm_vector_consumer.cpp`
-- `shm_nested_producer.cpp` / `shm_nested_consumer.cpp`
-- `shm_map_producer.cpp` / `shm_map_consumer.cpp`
-- `shm_open_or_create.cpp`
-- `shm_semaphore.cpp`
-- `shm_mutex_robust.cpp`
-- `shm_manager_lifecycle.cpp`
+查找或创建：
 
-其中：
+```cpp
+auto* value = segment.find_or_construct<int>("Answer", 42);
+```
 
-- `string` 示例展示最基础的命名对象共享
-- `vector` 示例展示共享容器和显式加锁
-- `nested` 示例展示容器嵌套容器
-- `map` 示例展示有序键值存储和较复杂的业务结构
-- `open_or_create` 示例验证首次创建会初始化段，再次打开会复用已有对象
+创建数组：
 
-## 使用约束与注意事项
+```cpp
+int* values = segment.construct_array<int>("Values", 4, 7);
+std::size_t count = 0;
+int* found = segment.find_array<int>("Values", &count);
+```
 
-- 放进共享内存容器的对象，内部成员也必须是共享内存友好的类型。
-  - 例如 `SharedMemoryString`、`SharedMemoryVector`、`SharedMemoryMap`
-  - 或纯 POD / 标量类型
-- 不要在共享对象内部保存普通裸指针、`std::string`、`std::vector` 等进程私有内存对象。
-- 多进程并发读写共享对象时，必须由调用方保证同步。
-- `open_or_create` 已区分首次创建和打开已有段；极端崩溃恢复场景仍建议由业务层做清理或重建策略。
+销毁：
 
-可通过 CTest 运行已注册的独立用例：
+```cpp
+segment.destroy<int>("Answer");
+segment.destroy_array<int>("Values");
+segment.destroy_ptr(value);
+```
+
+当前实现会记录实例数量、对象大小和类型指纹。`find<T>`、`find_array<T>`、`find_or_construct<T>`、`destroy<T>`、`destroy_ptr<T>` 使用的 `T` 和创建类型不一致时会抛出异常，并保持原对象不被错误销毁。
+
+## Segment Grow / Shrink
+
+接口：
+
+```cpp
+bool grew = ManagedSharedMemory::grow("demo_segment", 64 * 1024);
+bool shrunk = ManagedSharedMemory::shrink_to_fit("demo_segment");
+```
+
+语义：
+
+- 这是静态维护操作，不应与其他正在访问同一段共享内存的进程并发执行。
+- 成功时会更新共享内存对象大小和 manager 元数据。
+- 如果平台不支持对 POSIX shm 做二次 `ftruncate`，函数会返回 `false`，并保持现有对象和 allocator 元数据一致。
+
+macOS 上常见限制是 POSIX shm 创建后无法可靠二次调整大小，测试已覆盖失败不破坏状态的路径。
+
+## 测试
+
+构建：
+
+```sh
+cmake -S . -B build
+cmake --build build -j 8
+```
+
+运行全部 CTest：
 
 ```sh
 ctest --test-dir build --output-on-failure
 ```
 
+当前注册测试：
+
+```text
+shm_semaphore
+shm_mutex_robust
+shm_open_or_create
+shm_manager_lifecycle
+shm_allocator_fragmentation
+shm_concurrent_process_stress
+shm_crash_recovery_complex
+shm_read_only_snapshot
+```
+
+只运行复杂场景：
+
+```sh
+ctest --test-dir build -L complex --output-on-failure
+```
+
+复杂场景覆盖：
+
+- `shm_allocator_fragmentation`：碎片化分配、批量分配、原地扩容、sanity。
+- `shm_concurrent_process_stress`：多进程打开同一段，锁保护下更新 vector/map/counter。
+- `shm_crash_recovery_complex`：子进程持锁退出，父进程检测 owner-dead 并恢复业务状态。
+- `shm_read_only_snapshot`：只读映射读取 string/vector，确认写 API 被拒绝。
+
+示例型 producer/consumer 程序也会被构建，但不是全部注册到 CTest：
+
+- `shm_string_producer` / `shm_string_consumer`
+- `shm_vector_producer` / `shm_vector_consumer`
+- `shm_nested_producer` / `shm_nested_consumer`
+- `shm_map_producer` / `shm_map_consumer`
+
+性能 smoke benchmark：
+
+```sh
+./build/shm_benchmark
+```
+
+它会输出 allocator、`allocate_many`、map insert/find/erase 的简单耗时指标，仅用于观察趋势，不作为稳定性能基准。
+
+## 使用约束
+
+- 放进共享内存的对象不能持有进程私有资源指针。
+- 容器成员应使用共享内存友好类型，例如 `SharedMemoryString`、`SharedMemoryVector`、`SharedMemoryMap`。
+- 不要把 `std::string`、`std::vector`、普通裸指针直接作为跨进程共享对象成员，除非它们只保存进程本地临时状态。
+- 容器不自带业务锁。多进程并发读写必须由调用方同步。
+- `open_read_only` 会检测 manager 元数据是否稳定；业务对象内容如果仍有 writer 并发修改，需要额外同步协议。
+- `destroy<T>` 必须使用和构造时一致的类型，否则会抛出类型不匹配异常。
+- POSIX shared memory 名称在不同平台有长度和字符限制，测试里使用短名称避免 macOS `ENAMETOOLONG`。
+- `ManagedSharedMemory::remove(name)` 只 unlink 名称；已经映射的进程仍可继续访问到它们释放映射为止。
+
+## 与 Boost.Interprocess 的关系
+
+本项目参考了 Boost.Interprocess 的以下思路：
+
+- managed segment 作为共享内存入口。
+- offset pointer 支持不同进程不同映射基址。
+- 段内 allocator + shared-memory-aware STL-like containers。
+- named object registry。
+- manager 内部元数据加锁。
+- robust synchronization 和 sanity 检查。
+- grow/shrink 作为静态维护操作。
+
+本项目刻意不引入 Boost 依赖，也没有完整复刻 Boost 的所有能力。当前仍可继续增强的方向包括：
+
+- 跨编译器、跨版本更稳定的命名对象类型标识策略。
+- 更完整的 `OffsetPtr` 标准库互操作能力。
+- 更细粒度的只读快照协议，覆盖业务对象内容版本。
+- 真正的 `atomic_func` 多对象原子发布。
+- allocator 边界标签、末尾哨兵和树形空闲索引。
+- 真正预分配资源的 named object index reserve。
+
 ## 安装与 CMake 集成
 
-项目支持 CMake install/export：
+安装：
 
 ```sh
 cmake --install build --prefix /your/install/prefix
 ```
 
-下游项目可使用导出目标：
+下游项目：
 
 ```cmake
 find_package(shm_next REQUIRED CONFIG)
 target_link_libraries(your_target PRIVATE shm_next::interprocess)
 ```
 
-## 一句话总结
+## 当前定位
 
-如果你只想记住一条：  
-`ManagedSharedMemory` 负责“打开共享内存”，`SharedMemoryAllocator` 负责“把对象真的放进去”，`OffsetPtr` 负责“让不同进程都能正确找到这些对象”，而 `container/` 下的容器负责“像普通 STL 一样使用这些共享数据”。
+`shm_next` 的定位是工程内可控、可测试、低依赖的共享内存基础设施。它已经覆盖常见跨进程共享对象场景，并通过 CTest 持续验证核心稳健性；对于更复杂的事务、一致性快照和大规模分配策略，后续可以继续按 Boost.Interprocess 的成熟设计逐步补齐。

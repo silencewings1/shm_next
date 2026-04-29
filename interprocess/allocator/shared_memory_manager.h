@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <iterator>
 #include <limits>
 #include <mutex>
@@ -14,6 +15,7 @@
 #include <signal.h>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <unistd.h>
 #include <utility>
@@ -24,7 +26,7 @@ namespace interprocess
 class alignas(16) SharedMemoryManager
 {
 public:
-    static constexpr uint32_t MAGIC = 0x534D4D32; // "SMM2"
+    static constexpr uint32_t MAGIC = 0x534D4D33; // "SMM3"
 
     enum class InitializationState : uint32_t
     {
@@ -133,12 +135,12 @@ public:
 
     void* allocate(std::size_t size, std::size_t alignment)
     {
-        return with_manager_lock([&] { return block_allocator.allocate(size, alignment); });
+        return with_manager_write_lock([&] { return block_allocator.allocate(size, alignment); });
     }
 
     void deallocate(void* ptr)
     {
-        with_manager_lock([&] { block_allocator.deallocate(ptr); });
+        with_manager_write_lock([&] { block_allocator.deallocate(ptr); });
     }
 
     void allocate_many(std::size_t size, std::size_t count, std::size_t alignment, void** out)
@@ -147,7 +149,8 @@ public:
         {
             throw std::invalid_argument("allocate_many output array must not be null");
         }
-        with_manager_lock([&] { block_allocator.allocate_many(size, count, alignment, out); });
+        with_manager_write_lock(
+            [&] { block_allocator.allocate_many(size, count, alignment, out); });
     }
 
     void deallocate_many(void* const* ptrs, std::size_t count)
@@ -156,12 +159,12 @@ public:
         {
             throw std::invalid_argument("deallocate_many pointer array must not be null");
         }
-        with_manager_lock([&] { block_allocator.deallocate_many(ptrs, count); });
+        with_manager_write_lock([&] { block_allocator.deallocate_many(ptrs, count); });
     }
 
     bool try_expand(void* ptr, std::size_t new_size, std::size_t alignment)
     {
-        return with_manager_lock(
+        return with_manager_write_lock(
             [&] { return block_allocator.try_expand(ptr, new_size, alignment); });
     }
 
@@ -290,6 +293,10 @@ public:
         std::size_t name_length = validate_name(name);
         return with_manager_lock([&]() -> T* {
             detail::NamedObjectHeader* curr = named_objects.find_ready(name, name_length);
+            if (curr != nullptr)
+            {
+                validate_named_type<T>(*curr);
+            }
             return curr ? static_cast<T*>(curr->ptr.get()) : nullptr;
         });
     }
@@ -308,6 +315,7 @@ public:
                 }
                 return nullptr;
             }
+            validate_named_type<T>(*curr);
             if (count != nullptr)
             {
                 *count = curr->instance_count;
@@ -320,15 +328,17 @@ public:
     bool destroy(const char* name)
     {
         std::size_t name_length = validate_name(name);
-        detail::NamedObjectHeader* header = with_manager_lock([&]() -> detail::NamedObjectHeader* {
-            detail::NamedObjectHeader* found = named_objects.find_ready(name, name_length);
-            if (found != nullptr)
-            {
-                named_objects.mark_not_ready(found, detail::NamedObjectState::destroying);
-                found->owner_pid = current_process_id();
-            }
-            return found;
-        });
+        detail::NamedObjectHeader* header =
+            with_manager_write_lock([&]() -> detail::NamedObjectHeader* {
+                detail::NamedObjectHeader* found = named_objects.find_ready(name, name_length);
+                if (found != nullptr)
+                {
+                    validate_named_type<T>(*found);
+                    named_objects.mark_not_ready(found, detail::NamedObjectState::destroying);
+                    found->owner_pid = current_process_id();
+                }
+                return found;
+            });
         return destroy_reserved_object<T>(header);
     }
 
@@ -346,15 +356,17 @@ public:
             return false;
         }
 
-        detail::NamedObjectHeader* header = with_manager_lock([&]() -> detail::NamedObjectHeader* {
-            detail::NamedObjectHeader* found = named_objects.find_ready_by_ptr(ptr);
-            if (found != nullptr)
-            {
-                named_objects.mark_not_ready(found, detail::NamedObjectState::destroying);
-                found->owner_pid = current_process_id();
-            }
-            return found;
-        });
+        detail::NamedObjectHeader* header =
+            with_manager_write_lock([&]() -> detail::NamedObjectHeader* {
+                detail::NamedObjectHeader* found = named_objects.find_ready_by_ptr(ptr);
+                if (found != nullptr)
+                {
+                    validate_named_type<T>(*found);
+                    named_objects.mark_not_ready(found, detail::NamedObjectState::destroying);
+                    found->owner_pid = current_process_id();
+                }
+                return found;
+            });
         return destroy_reserved_object<T>(header);
     }
 
@@ -375,12 +387,12 @@ public:
 
     void reserve_named_objects(std::size_t count)
     {
-        with_manager_lock([&] { named_objects.reserve(count); });
+        with_manager_write_lock([&] { named_objects.reserve(count); });
     }
 
     void shrink_to_fit_indexes()
     {
-        with_manager_lock([&] { named_objects.shrink_to_fit(); });
+        with_manager_write_lock([&] { named_objects.shrink_to_fit(); });
     }
 
     template <typename Func>
@@ -399,17 +411,36 @@ public:
     template <typename Func>
     void for_each_named_object_read_only(Func&& func) const
     {
-        named_objects.for_each([&](const detail::NamedObjectHeader& header) {
-            if (header.state == detail::NamedObjectState::ready)
-            {
-                func(header.name.get(), header.ptr.get(), header.instance_count);
-            }
-        });
+        const uint64_t generation = wait_for_stable_metadata_generation();
+        std::exception_ptr callback_error;
+
+        try
+        {
+            named_objects.for_each([&](const detail::NamedObjectHeader& header) {
+                if (header.state == detail::NamedObjectState::ready)
+                {
+                    func(header.name.get(), header.ptr.get(), header.instance_count);
+                }
+            });
+        }
+        catch (...)
+        {
+            callback_error = std::current_exception();
+        }
+
+        if (!is_metadata_generation_stable(generation))
+        {
+            throw std::runtime_error("Shared memory metadata changed during read-only iteration");
+        }
+        if (callback_error)
+        {
+            std::rethrow_exception(callback_error);
+        }
     }
 
     std::size_t recover_abandoned_named_objects()
     {
-        return with_manager_lock([&] {
+        return with_manager_write_lock([&] {
             std::size_t recovered = 0;
             while (true)
             {
@@ -461,12 +492,12 @@ public:
 
     void zero_free_memory()
     {
-        with_manager_lock([&] { block_allocator.zero_free_memory(); });
+        with_manager_write_lock([&] { block_allocator.zero_free_memory(); });
     }
 
     bool grow_to_size(std::size_t new_total_size)
     {
-        return with_manager_lock([&] {
+        return with_manager_write_lock([&] {
             if (new_total_size <= total_size)
             {
                 return false;
@@ -482,7 +513,7 @@ public:
 
     std::size_t shrink_to_fit()
     {
-        return with_manager_lock([&] {
+        return with_manager_write_lock([&] {
             std::size_t new_total_size = block_allocator.shrink_to_fit();
             total_size = new_total_size;
             return new_total_size;
@@ -493,48 +524,67 @@ public:
     const T* find_read_only(const char* name) const
     {
         std::size_t name_length = validate_name(name);
-        detail::NamedObjectHeader* curr = named_objects.find_ready(name, name_length);
-        return curr ? static_cast<const T*>(curr->ptr.get()) : nullptr;
+        return with_read_only_snapshot([&]() -> const T* {
+            detail::NamedObjectHeader* curr = named_objects.find_ready(name, name_length);
+            if (curr != nullptr)
+            {
+                validate_named_type<T>(*curr);
+            }
+            return curr ? static_cast<const T*>(curr->ptr.get()) : nullptr;
+        });
     }
 
     template <typename T>
     const T* find_array_read_only(const char* name, std::size_t* count = nullptr) const
     {
         std::size_t name_length = validate_name(name);
-        detail::NamedObjectHeader* curr = named_objects.find_ready(name, name_length);
-        if (curr == nullptr)
-        {
+        return with_read_only_snapshot([&]() -> const T* {
+            detail::NamedObjectHeader* curr = named_objects.find_ready(name, name_length);
+            if (curr == nullptr)
+            {
+                if (count != nullptr)
+                {
+                    *count = 0;
+                }
+                return nullptr;
+            }
+            validate_named_type<T>(*curr);
             if (count != nullptr)
             {
-                *count = 0;
+                *count = curr->instance_count;
             }
-            return nullptr;
-        }
-        if (count != nullptr)
-        {
-            *count = curr->instance_count;
-        }
-        return static_cast<const T*>(curr->ptr.get());
+            return static_cast<const T*>(curr->ptr.get());
+        });
     }
 
     std::size_t get_num_named_objects_read_only() const
     {
-        return named_objects.ready_size();
+        return with_read_only_snapshot([&] { return named_objects.ready_size(); });
     }
 
     std::size_t get_num_total_named_objects_read_only() const
     {
-        return named_objects.total_size();
+        return with_read_only_snapshot([&] { return named_objects.total_size(); });
     }
 
     std::size_t get_reserved_named_objects_read_only() const
     {
-        return named_objects.reserved_size();
+        return with_read_only_snapshot([&] { return named_objects.reserved_size(); });
     }
 
     std::size_t get_free_memory_read_only() const
     {
-        return block_allocator.get_free_memory();
+        return with_read_only_snapshot([&] { return block_allocator.get_free_memory(); });
+    }
+
+    void validate_read_only_access() const
+    {
+        with_read_only_snapshot([&] {
+            if (!check_sanity_unlocked())
+            {
+                throw std::runtime_error("Shared memory manager read-only sanity check failed");
+            }
+        });
     }
 
 private:
@@ -590,6 +640,37 @@ private:
         return count * sizeof(T);
     }
 
+    static constexpr uint64_t fnv1a_hash(const char* value) noexcept
+    {
+        uint64_t hash = 1469598103934665603ull;
+        while (*value != '\0')
+        {
+            hash ^= static_cast<unsigned char>(*value);
+            hash *= 1099511628211ull;
+            ++value;
+        }
+        return hash;
+    }
+
+    template <typename T>
+    static constexpr uint64_t named_type_hash() noexcept
+    {
+#if defined(_MSC_VER)
+        return fnv1a_hash(__FUNCSIG__);
+#else
+        return fnv1a_hash(__PRETTY_FUNCTION__);
+#endif
+    }
+
+    template <typename T>
+    static void validate_named_type(const detail::NamedObjectHeader& header)
+    {
+        if (header.object_size != sizeof(T) || header.type_hash != named_type_hash<T>())
+        {
+            throw std::runtime_error("Named shared memory object type mismatch");
+        }
+    }
+
     template <typename T>
     NamedReservation reserve_named_storage(const char* name, std::size_t count,
                                            bool return_existing_ready)
@@ -599,12 +680,13 @@ private:
         uint64_t name_hash = detail::NamedObjectRegistry::hash_name(name, name_length);
         NamedReservation reservation;
 
-        with_manager_lock([&] {
+        with_manager_write_lock([&] {
             detail::NamedObjectHeader* existing = named_objects.find_any(name, name_length);
             if (existing != nullptr)
             {
                 if (return_existing_ready && existing->state == detail::NamedObjectState::ready)
                 {
+                    validate_named_type<T>(*existing);
                     reservation.existing_object = existing->ptr.get();
                 }
                 return;
@@ -640,6 +722,7 @@ private:
             header->name_length = name_length;
             header->instance_count = count;
             header->object_size = sizeof(T);
+            header->type_hash = named_type_hash<T>();
             header->name_hash = name_hash;
             header->owner_pid = current_process_id();
             header->state = detail::NamedObjectState::constructing;
@@ -655,7 +738,7 @@ private:
 
     void mark_named_object_ready(detail::NamedObjectHeader* header)
     {
-        with_manager_lock([&] {
+        with_manager_write_lock([&] {
             header->owner_pid = 0;
             named_objects.mark_ready(header);
         });
@@ -663,7 +746,7 @@ private:
 
     void release_failed_construction(detail::NamedObjectHeader* header)
     {
-        with_manager_lock([&] { deallocate_named_storage_unlocked(header); });
+        with_manager_write_lock([&] { deallocate_named_storage_unlocked(header); });
     }
 
     template <typename T>
@@ -688,7 +771,7 @@ private:
         std::size_t count = header->instance_count;
         destroy_constructed_range(objects, count);
 
-        with_manager_lock([&] { deallocate_named_storage_unlocked(header); });
+        with_manager_write_lock([&] { deallocate_named_storage_unlocked(header); });
         return true;
     }
 
@@ -743,6 +826,95 @@ private:
 #endif
     }
 
+    static uint64_t load_generation_word(const uint64_t* word) noexcept
+    {
+#if defined(__GNUC__) || defined(__clang__)
+        return __atomic_load_n(word, __ATOMIC_ACQUIRE);
+#else
+        return *reinterpret_cast<const volatile uint64_t*>(word);
+#endif
+    }
+
+    static uint64_t add_generation_word(uint64_t* word, uint64_t increment) noexcept
+    {
+#if defined(__GNUC__) || defined(__clang__)
+        return __atomic_add_fetch(word, increment, __ATOMIC_ACQ_REL);
+#else
+        *reinterpret_cast<volatile uint64_t*>(word) += increment;
+        return *reinterpret_cast<volatile uint64_t*>(word);
+#endif
+    }
+
+    uint64_t load_metadata_generation() const noexcept
+    {
+        return load_generation_word(&metadata_generation);
+    }
+
+    void begin_metadata_write() const noexcept
+    {
+        if ((load_metadata_generation() & 1u) == 0)
+        {
+            (void)add_generation_word(&metadata_generation, 1);
+        }
+    }
+
+    void end_metadata_write() const noexcept
+    {
+        if ((load_metadata_generation() & 1u) != 0)
+        {
+            (void)add_generation_word(&metadata_generation, 1);
+        }
+    }
+
+    bool is_metadata_generation_stable(uint64_t generation) const noexcept
+    {
+        return load_metadata_generation() == generation;
+    }
+
+    uint64_t wait_for_stable_metadata_generation() const
+    {
+        constexpr int max_attempts = 1024;
+        for (int attempt = 0; attempt < max_attempts; ++attempt)
+        {
+            const uint64_t generation = load_metadata_generation();
+            if ((generation & 1u) == 0)
+            {
+                return generation;
+            }
+            std::this_thread::yield();
+        }
+
+        throw std::runtime_error("Shared memory metadata writer is active");
+    }
+
+    class MetadataWriteGuard
+    {
+    public:
+        explicit MetadataWriteGuard(const SharedMemoryManager& manager) noexcept
+            : manager(&manager), active(true)
+        {
+            manager.begin_metadata_write();
+        }
+
+        ~MetadataWriteGuard()
+        {
+            finish();
+        }
+
+        void finish() noexcept
+        {
+            if (active)
+            {
+                manager->end_metadata_write();
+                active = false;
+            }
+        }
+
+    private:
+        const SharedMemoryManager* manager;
+        bool active;
+    };
+
     bool check_sanity_unlocked() const noexcept
     {
         return get_initialization_state(this) == InitializationState::initialized &&
@@ -767,6 +939,7 @@ private:
         try
         {
             mutex.mark_consistent();
+            end_metadata_write();
         }
         catch (...)
         {
@@ -800,17 +973,96 @@ private:
         }
     }
 
+    template <typename Func>
+    auto with_manager_write_lock(Func&& func) const -> std::invoke_result_t<Func>
+    {
+        lock_for_manager_recovery();
+        MetadataWriteGuard metadata_write(*this);
+        try
+        {
+            if constexpr (std::is_void_v<std::invoke_result_t<Func>>)
+            {
+                std::forward<Func>(func)();
+                metadata_write.finish();
+                mutex.unlock();
+            }
+            else
+            {
+                std::invoke_result_t<Func> result = std::forward<Func>(func)();
+                metadata_write.finish();
+                mutex.unlock();
+                return result;
+            }
+        }
+        catch (...)
+        {
+            metadata_write.finish();
+            mutex.unlock();
+            throw;
+        }
+    }
+
+    template <typename Func>
+    auto with_read_only_snapshot(Func&& func) const -> std::invoke_result_t<Func>
+    {
+        constexpr int max_attempts = 1024;
+        for (int attempt = 0; attempt < max_attempts; ++attempt)
+        {
+            const uint64_t generation = wait_for_stable_metadata_generation();
+
+            if constexpr (std::is_void_v<std::invoke_result_t<Func>>)
+            {
+                try
+                {
+                    std::forward<Func>(func)();
+                    if (is_metadata_generation_stable(generation))
+                    {
+                        return;
+                    }
+                }
+                catch (...)
+                {
+                    if (is_metadata_generation_stable(generation))
+                    {
+                        throw;
+                    }
+                }
+            }
+            else
+            {
+                try
+                {
+                    std::invoke_result_t<Func> result = std::forward<Func>(func)();
+                    if (is_metadata_generation_stable(generation))
+                    {
+                        return result;
+                    }
+                }
+                catch (...)
+                {
+                    if (is_metadata_generation_stable(generation))
+                    {
+                        throw;
+                    }
+                }
+            }
+        }
+
+        throw std::runtime_error("Shared memory metadata changed during read-only access");
+    }
+
 private:
     uint32_t initialization_state;
     uint32_t magic;
     mutable InterprocessMutex mutex;
+    mutable uint64_t metadata_generation;
     std::size_t total_size;
     detail::SharedMemoryBlockAllocator block_allocator;
     detail::NamedObjectRegistry named_objects;
 
     explicit SharedMemoryManager(std::size_t total_size)
         : initialization_state(static_cast<uint32_t>(InitializationState::initializing)), magic(0),
-          total_size(total_size), block_allocator(), named_objects()
+          metadata_generation(0), total_size(total_size), block_allocator(), named_objects()
     {
         named_objects.initialize();
         block_allocator.initialize(this, sizeof(SharedMemoryManager), total_size);

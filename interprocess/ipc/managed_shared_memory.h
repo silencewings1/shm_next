@@ -443,6 +443,10 @@ private:
                         {
                             manager->recover_abandoned_named_objects();
                         }
+                        else
+                        {
+                            manager->validate_read_only_access();
+                        }
                         return;
                     }
 

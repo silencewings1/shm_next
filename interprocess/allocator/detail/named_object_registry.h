@@ -24,6 +24,7 @@ struct alignas(16) NamedObjectHeader
     std::size_t name_length;
     std::size_t instance_count;
     std::size_t object_size;
+    uint64_t type_hash;
     uint64_t name_hash;
     uint64_t owner_pid;
     NamedObjectState state;
