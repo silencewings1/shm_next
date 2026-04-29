@@ -97,13 +97,44 @@ endforeach()
 
 enable_testing()
 
-foreach(test_name IN ITEMS
+set(SHM_NEXT_CTEST_TARGETS
     shm_semaphore
     shm_mutex_robust
     shm_open_or_create
     shm_manager_lifecycle
+    shm_allocator_fragmentation
+    shm_concurrent_process_stress
+    shm_crash_recovery_complex
+    shm_read_only_snapshot
 )
+
+foreach(test_name IN LISTS SHM_NEXT_CTEST_TARGETS)
     if(TARGET "${test_name}")
         add_test(NAME "${test_name}" COMMAND "${test_name}")
+        set_tests_properties("${test_name}" PROPERTIES TIMEOUT 30)
     endif()
 endforeach()
+
+if(TEST shm_allocator_fragmentation)
+    set_tests_properties(shm_allocator_fragmentation PROPERTIES
+        LABELS "complex;allocator"
+    )
+endif()
+
+if(TEST shm_concurrent_process_stress)
+    set_tests_properties(shm_concurrent_process_stress PROPERTIES
+        LABELS "complex;process;container"
+    )
+endif()
+
+if(TEST shm_crash_recovery_complex)
+    set_tests_properties(shm_crash_recovery_complex PROPERTIES
+        LABELS "complex;process;recovery"
+    )
+endif()
+
+if(TEST shm_read_only_snapshot)
+    set_tests_properties(shm_read_only_snapshot PROPERTIES
+        LABELS "complex;readonly"
+    )
+endif()
