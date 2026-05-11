@@ -36,6 +36,7 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 find_package(Threads REQUIRED)
+find_program(BASH_EXECUTABLE bash REQUIRED)
 
 file(GLOB_RECURSE INTERPROCESS_HEADERS CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/interprocess/*.h"
@@ -140,6 +141,61 @@ foreach(test_name IN LISTS SHM_NEXT_CTEST_TARGETS)
         set_tests_properties("${test_name}" PROPERTIES TIMEOUT 30)
     endif()
 endforeach()
+
+function(add_producer_consumer_test test_name producer_target consumer_target mode ready_pattern timeout)
+    if(TARGET "${producer_target}" AND TARGET "${consumer_target}")
+        add_test(NAME "${test_name}"
+            COMMAND
+                "${BASH_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/run_producer_consumer_pair.sh"
+                --producer "$<TARGET_FILE:${producer_target}>"
+                --consumer "$<TARGET_FILE:${consumer_target}>"
+                --mode "${mode}"
+                --ready-pattern "${ready_pattern}"
+                --ready-timeout 30
+        )
+        set_tests_properties("${test_name}" PROPERTIES
+            TIMEOUT "${timeout}"
+            LABELS "integration;producer;consumer"
+        )
+    endif()
+endfunction()
+
+add_producer_consumer_test(
+    shm_string_producer_consumer
+    shm_string_producer
+    shm_string_consumer
+    fifo
+    "Press Enter to cleanup and exit"
+    60
+)
+
+add_producer_consumer_test(
+    shm_nested_producer_consumer
+    shm_nested_producer
+    shm_nested_consumer
+    fifo
+    "Data written. Press Enter"
+    60
+)
+
+add_producer_consumer_test(
+    shm_map_producer_consumer
+    shm_map_producer
+    shm_map_consumer
+    background
+    "Shared map ready"
+    60
+)
+
+add_producer_consumer_test(
+    shm_vector_producer_consumer
+    shm_vector_producer
+    shm_vector_consumer
+    background
+    "Starting to produce sensor data"
+    120
+)
 
 if(TEST shm_allocator_fragmentation)
     set_tests_properties(shm_allocator_fragmentation PROPERTIES
