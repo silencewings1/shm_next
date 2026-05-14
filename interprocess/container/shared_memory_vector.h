@@ -3,6 +3,8 @@
 #include "../allocator/offset_ptr.h"
 #include "../allocator/shared_memory_allocator.h"
 #include <cstddef>
+#include <iterator>
+#include <stdexcept>
 #include <utility>
 
 namespace interprocess
@@ -23,6 +25,8 @@ public:
     using const_pointer = OffsetPtr<const T>;
     using iterator = pointer;
     using const_iterator = const_pointer;
+    using reverse_iterator = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
 
     explicit SharedMemoryVector(const Allocator& alloc) noexcept
         : allocator(alloc), start(nullptr), finish(nullptr), end_of_storage(nullptr)
@@ -110,6 +114,10 @@ public:
     {
         return size() == 0;
     }
+    size_type max_size() const noexcept
+    {
+        return allocator.max_size();
+    }
 
     reference operator[](size_type n)
     {
@@ -118,6 +126,32 @@ public:
     const_reference operator[](size_type n) const
     {
         return start[n];
+    }
+
+    reference at(size_type n)
+    {
+        if (n >= size())
+        {
+            throw std::out_of_range("SharedMemoryVector::at index out of range");
+        }
+        return (*this)[n];
+    }
+    const_reference at(size_type n) const
+    {
+        if (n >= size())
+        {
+            throw std::out_of_range("SharedMemoryVector::at index out of range");
+        }
+        return (*this)[n];
+    }
+
+    reference front()
+    {
+        return *start;
+    }
+    const_reference front() const
+    {
+        return *start;
     }
 
     reference back()
@@ -137,6 +171,10 @@ public:
     {
         return start;
     }
+    const_iterator cbegin() const noexcept
+    {
+        return begin();
+    }
     iterator end() noexcept
     {
         return finish;
@@ -145,6 +183,43 @@ public:
     {
         return finish;
     }
+    const_iterator cend() const noexcept
+    {
+        return end();
+    }
+    reverse_iterator rbegin() noexcept
+    {
+        return reverse_iterator(end());
+    }
+    const_reverse_iterator rbegin() const noexcept
+    {
+        return const_reverse_iterator(end());
+    }
+    const_reverse_iterator crbegin() const noexcept
+    {
+        return const_reverse_iterator(cend());
+    }
+    reverse_iterator rend() noexcept
+    {
+        return reverse_iterator(begin());
+    }
+    const_reverse_iterator rend() const noexcept
+    {
+        return const_reverse_iterator(begin());
+    }
+    const_reverse_iterator crend() const noexcept
+    {
+        return const_reverse_iterator(cbegin());
+    }
+
+    T* data() noexcept
+    {
+        return start.get();
+    }
+    const T* data() const noexcept
+    {
+        return start.get();
+    }
 
     void reserve(size_type new_capacity)
     {
@@ -152,6 +227,16 @@ public:
         {
             reallocate(new_capacity);
         }
+    }
+
+    void resize(size_type count)
+    {
+        resize_default(count);
+    }
+
+    void resize(size_type count, const T& value)
+    {
+        resize_fill(count, value);
     }
 
     void push_back(const T& value)
@@ -203,11 +288,12 @@ public:
         }
     }
 
-    void erase(iterator pos)
+    iterator erase(iterator pos)
     {
         if (pos == end())
-            return;
+            return pos;
 
+        iterator result = pos;
         for (iterator next = pos + 1; next != end(); ++pos, ++next)
         {
             *pos = std::move(*next);
@@ -215,6 +301,7 @@ public:
 
         finish -= 1;
         allocator.destroy(finish.get());
+        return result;
     }
 
 private:
@@ -302,6 +389,92 @@ private:
         start.set_pointer(new_data);
         finish.set_pointer(new_data + old_size);
         end_of_storage.set_pointer(new_data + new_capacity);
+    }
+
+    void resize_default(size_type count)
+    {
+        const size_type old_size = size();
+        if (count < old_size)
+        {
+            destroy_tail(count);
+            return;
+        }
+        if (count == old_size)
+        {
+            return;
+        }
+
+        if (count > capacity())
+        {
+            reallocate(count);
+        }
+        construct_default_tail(old_size, count);
+    }
+
+    void resize_fill(size_type count, const T& value)
+    {
+        const size_type old_size = size();
+        if (count < old_size)
+        {
+            destroy_tail(count);
+            return;
+        }
+        if (count == old_size)
+        {
+            return;
+        }
+
+        if (count > capacity())
+        {
+            reallocate(count);
+        }
+        construct_fill_tail(old_size, count, value);
+    }
+
+    void construct_default_tail(size_type from, size_type to)
+    {
+        size_type constructed = from;
+        try
+        {
+            for (; constructed < to; ++constructed)
+            {
+                allocator.construct(start.get() + constructed);
+            }
+        }
+        catch (...)
+        {
+            destroy_range(start.get() + from, constructed - from);
+            finish.set_pointer(start.get() + from);
+            throw;
+        }
+        finish.set_pointer(start.get() + to);
+    }
+
+    void construct_fill_tail(size_type from, size_type to, const T& value)
+    {
+        size_type constructed = from;
+        try
+        {
+            for (; constructed < to; ++constructed)
+            {
+                allocator.construct(start.get() + constructed, value);
+            }
+        }
+        catch (...)
+        {
+            destroy_range(start.get() + from, constructed - from);
+            finish.set_pointer(start.get() + from);
+            throw;
+        }
+        finish.set_pointer(start.get() + to);
+    }
+
+    void destroy_tail(size_type new_size) noexcept
+    {
+        while (size() > new_size)
+        {
+            pop_back();
+        }
     }
 
     void reallocate_exact(size_type new_capacity)

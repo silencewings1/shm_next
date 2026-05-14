@@ -307,6 +307,20 @@ public:
         return compare;
     }
 
+    void swap(SharedMemoryRbTreeMap& other)
+    {
+        using std::swap;
+        swap(allocator, other.allocator);
+        swap(node_allocator, other.node_allocator);
+        swap(compare, other.compare);
+        swap(root, other.root);
+        swap(free_nodes, other.free_nodes);
+        swap(size_, other.size_);
+        swap(cached_node_count_, other.cached_node_count_);
+        swap(node_pool_hits_, other.node_pool_hits_);
+        swap(node_pool_allocations_, other.node_pool_allocations_);
+    }
+
     mapped_type& at(const key_type& key)
     {
         iterator it = find(key);
@@ -352,6 +366,42 @@ public:
     {
         value_type value(std::forward<Args>(args)...);
         return insert_value(std::move(value));
+    }
+
+    template <typename... Args>
+    std::pair<iterator, bool> try_emplace(const key_type& key, Args&&... args)
+    {
+        return try_emplace_impl(key, key, std::forward<Args>(args)...);
+    }
+
+    template <typename... Args>
+    std::pair<iterator, bool> try_emplace(key_type&& key, Args&&... args)
+    {
+        return try_emplace_impl(key, std::move(key), std::forward<Args>(args)...);
+    }
+
+    template <typename M>
+    std::pair<iterator, bool> insert_or_assign(const key_type& key, M&& obj)
+    {
+        iterator it = find(key);
+        if (it != end())
+        {
+            it->second = std::forward<M>(obj);
+            return std::make_pair(it, false);
+        }
+        return emplace(key, std::forward<M>(obj));
+    }
+
+    template <typename M>
+    std::pair<iterator, bool> insert_or_assign(key_type&& key, M&& obj)
+    {
+        iterator it = find(key);
+        if (it != end())
+        {
+            it->second = std::forward<M>(obj);
+            return std::make_pair(it, false);
+        }
+        return emplace(std::move(key), std::forward<M>(obj));
     }
 
     void clear()
@@ -595,16 +645,19 @@ private:
     {
         Node* parent = nullptr;
         Node* current = root.get();
+        bool insert_left = false;
 
         while (current)
         {
             parent = current;
             if (compare(value.first, current->value.first))
             {
+                insert_left = true;
                 current = current->left.get();
             }
             else if (compare(current->value.first, value.first))
             {
+                insert_left = false;
                 current = current->right.get();
             }
             else
@@ -614,13 +667,51 @@ private:
         }
 
         Node* node = create_node(std::forward<ValueArg>(value));
+        return link_new_node(parent, insert_left, node);
+    }
+
+    template <typename KeyArg, typename... Args>
+    std::pair<iterator, bool> try_emplace_impl(const key_type& lookup_key, KeyArg&& key,
+                                               Args&&... args)
+    {
+        Node* parent = nullptr;
+        Node* current = root.get();
+        bool insert_left = false;
+
+        while (current)
+        {
+            parent = current;
+            if (compare(lookup_key, current->value.first))
+            {
+                insert_left = true;
+                current = current->left.get();
+            }
+            else if (compare(current->value.first, lookup_key))
+            {
+                insert_left = false;
+                current = current->right.get();
+            }
+            else
+            {
+                return std::make_pair(iterator(this, current), false);
+            }
+        }
+
+        Node* node =
+            create_node(std::piecewise_construct, std::forward_as_tuple(std::forward<KeyArg>(key)),
+                        std::forward_as_tuple(std::forward<Args>(args)...));
+        return link_new_node(parent, insert_left, node);
+    }
+
+    std::pair<iterator, bool> link_new_node(Node* parent, bool insert_left, Node* node)
+    {
         node->parent = parent;
 
         if (!parent)
         {
             root = node;
         }
-        else if (compare(node->value.first, parent->value.first))
+        else if (insert_left)
         {
             parent->left = node;
         }
@@ -634,8 +725,8 @@ private:
         return std::make_pair(iterator(this, node), true);
     }
 
-    template <typename ValueArg>
-    Node* create_node(ValueArg&& value)
+    template <typename... Args>
+    Node* create_node(Args&&... args)
     {
         Node* storage = pop_cached_node();
         bool from_cache = storage != nullptr;
@@ -647,7 +738,7 @@ private:
 
         try
         {
-            node_allocator.construct(storage, std::forward<ValueArg>(value));
+            node_allocator.construct(storage, std::forward<Args>(args)...);
         }
         catch (...)
         {

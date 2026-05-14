@@ -129,6 +129,7 @@ set(SHM_NEXT_CTEST_TARGETS
     shm_mutex_robust
     shm_open_or_create
     shm_manager_lifecycle
+    shm_container_stl_semantics
     shm_allocator_fragmentation
     shm_concurrent_process_stress
     shm_crash_recovery_complex

@@ -32,7 +32,19 @@ public:
         return *this;
     }
 
+    void swap(SharedMemoryMap& other)
+    {
+        base_type::swap(other);
+    }
+
     ~SharedMemoryMap() = default;
 };
+
+template <typename Key, typename T, typename Compare, typename Allocator>
+void swap(SharedMemoryMap<Key, T, Compare, Allocator>& lhs,
+          SharedMemoryMap<Key, T, Compare, Allocator>& rhs)
+{
+    lhs.swap(rhs);
+}
 
 } // namespace interprocess
