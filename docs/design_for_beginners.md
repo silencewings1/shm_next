@@ -546,7 +546,12 @@ macOS 上 POSIX shm 二次调整大小可能受限，所以测试覆盖了失败
 | `shm_read_only_snapshot` | 只读映射、只读 API、类型校验 |
 | `shm_mutex_robust` | robust mutex 行为 |
 | `shm_semaphore` | semaphore 和 condition 基础同步 |
-| `shm_benchmark` | allocator、map 等简单性能观察 |
+| `shm_string_producer_consumer` | string producer/consumer 集成流程 |
+| `shm_nested_producer_consumer` | 嵌套容器 producer/consumer 集成流程 |
+| `shm_map_producer_consumer` | map producer/consumer 集成流程 |
+| `shm_vector_producer_consumer` | 带业务锁的 vector producer/consumer 集成流程 |
+
+`shm_benchmark` 会被构建成可执行程序，但不注册为 CTest。它用于 allocator、`allocate_many`、map insert/find/erase 的性能趋势观察，不作为稳定性能基准。
 
 运行全部 CTest：
 
@@ -556,11 +561,27 @@ cmake --build build -j 8
 ctest --test-dir build --output-on-failure
 ```
 
+`CMAKE_BUILD_TYPE` 支持 `Release` 和 `Debug`，未指定时默认为 `Release`。如果要跑 Debug 构建：
+
+```sh
+cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-debug -j 8
+ctest --test-dir build-debug --output-on-failure
+```
+
 只运行复杂场景：
 
 ```sh
 ctest --test-dir build -L complex --output-on-failure
 ```
+
+只运行 producer/consumer 集成场景：
+
+```sh
+ctest --test-dir build -L producer --output-on-failure
+```
+
+producer/consumer CTest 由 `cmake/run_producer_consumer_pair.sh` 组织。脚本会先启动 producer，等待 ready 日志，再启动 consumer；需要回车退出的 producer 会通过 FIFO 自动接收换行并清理共享内存。
 
 ## 17. 常见使用模式
 

@@ -16,7 +16,7 @@
 - 跨进程同步：mutex、condition、semaphore，mutex 在支持的平台启用 robust owner-dead 语义。
 - 稳健性检查：allocator sanity、double-free 检测、非法指针检测、初始化状态机、崩溃构造清理。
 - 性能辅助：`allocate_many`、`deallocate_many`、`try_expand`、vector/string 原地扩容、map node cache。
-- CTest 覆盖：基础同步、生命周期、崩溃恢复、只读快照、多进程并发和 allocator 碎片场景。
+- CTest 覆盖：基础同步、生命周期、崩溃恢复、只读快照、多进程并发、allocator 碎片和 producer/consumer 集成场景。
 
 ## 目录结构
 
@@ -482,9 +482,11 @@ macOS 上常见限制是 POSIX shm 创建后无法可靠二次调整大小，测
 构建：
 
 ```sh
-cmake -S . -B build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j 8
 ```
+
+`CMAKE_BUILD_TYPE` 支持 `Release` 和 `Debug`，未指定时默认为 `Release`。
 
 运行全部 CTest：
 
@@ -503,6 +505,10 @@ shm_allocator_fragmentation
 shm_concurrent_process_stress
 shm_crash_recovery_complex
 shm_read_only_snapshot
+shm_string_producer_consumer
+shm_nested_producer_consumer
+shm_map_producer_consumer
+shm_vector_producer_consumer
 ```
 
 只运行复杂场景：
@@ -518,12 +524,20 @@ ctest --test-dir build -L complex --output-on-failure
 - `shm_crash_recovery_complex`：子进程持锁退出，父进程检测 owner-dead 并恢复业务状态。
 - `shm_read_only_snapshot`：只读映射读取 string/vector，确认写 API 被拒绝。
 
-示例型 producer/consumer 程序也会被构建，但不是全部注册到 CTest：
+只运行 producer/consumer 集成场景：
 
-- `shm_string_producer` / `shm_string_consumer`
-- `shm_vector_producer` / `shm_vector_consumer`
-- `shm_nested_producer` / `shm_nested_consumer`
-- `shm_map_producer` / `shm_map_consumer`
+```sh
+ctest --test-dir build -L producer --output-on-failure
+```
+
+producer/consumer 集成场景覆盖：
+
+- `shm_string_producer_consumer`：字符串 root object 的生产和消费。
+- `shm_nested_producer_consumer`：嵌套 vector/string 容器跨进程读取。
+- `shm_map_producer_consumer`：map 插入、更新、删除、区间查询和迭代顺序。
+- `shm_vector_producer_consumer`：带业务锁的 sensor vector 持续生产和消费。
+
+这些用例由 `cmake/run_producer_consumer_pair.sh` 组织。需要交互回车的 producer 会通过 FIFO 自动结束，长时间运行的 producer 会在输出 ready 日志后启动 consumer。
 
 性能 smoke benchmark：
 
