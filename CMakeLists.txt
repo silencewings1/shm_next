@@ -130,6 +130,8 @@ set(SHM_NEXT_CTEST_TARGETS
     shm_open_or_create
     shm_manager_lifecycle
     shm_container_stl_semantics
+    shm_map_perf_compare
+    shm_vector_perf_compare
     shm_allocator_fragmentation
     shm_concurrent_process_stress
     shm_crash_recovery_complex

@@ -6,6 +6,11 @@
 
 新读者建议先看 [shm_next 设计文档](docs/design_for_beginners.md)，它按学习路线、模块分层、内存布局、对象生命周期、allocator、只读快照和测试入口系统解释工程设计。
 
+性能对比文档：
+
+- [Vector 性能对比](docs/vector_performance_comparison.md)
+- [Map 性能对比](docs/map_performance_comparison.md)
+
 ## 核心能力
 
 - POSIX shared memory RAII 封装：`shm_open`、`ftruncate`、`mmap`、`munmap`、`shm_unlink`。
