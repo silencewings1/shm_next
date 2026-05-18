@@ -56,6 +56,8 @@ flowchart TD
     Allocator["SharedMemoryAllocator<T>"] --> Manager
     String["SharedMemoryString"] --> Allocator
     Vector["SharedMemoryVector<T>"] --> Allocator
+    List["SharedMemoryList<T>"] --> Allocator
+    HashMap["SharedMemoryHashMap<K,V>"] --> Allocator
     Map["SharedMemoryMap<K,V>"] --> Allocator
 
     String --> OffsetPtr["OffsetPtr<T>"]
@@ -414,6 +416,24 @@ values->push_back(2);
 - 内部也是 `start`、`finish`、`end_of_storage`。
 - 支持 `reserve`、`push_back`、`emplace_back`、`pop_back`、`erase`。
 - 扩容时如果相邻空间可用，可以原地扩容，减少 copy/move。
+
+### SharedMemoryList
+
+`SharedMemoryList<T>` 类似简化版 `std::list<T>`：
+
+- 双向链表节点和元素值都放在共享内存段内。
+- 节点之间的前驱/后继链接都通过 `OffsetPtr` 保存，跨进程重新映射后仍然有效。
+- 支持 `insert`、`erase`、`splice`、`merge`、`sort`、`unique`、`reverse` 等链表常见操作。
+- 适合频繁中间插入、节点搬移以及需要稳定迭代器语义的场景。
+
+### SharedMemoryHashMap
+
+`SharedMemoryHashMap<K,V>` 类似简化版 `std::unordered_map<K,V>`：
+
+- bucket 数组和节点都由共享内存 allocator 分配。
+- 节点内部同时保存 bucket 冲突链和全表迭代链，二者都用 `OffsetPtr` 连接。
+- 支持 `try_emplace`、`insert_or_assign`、`reserve`、`rehash`、`load_factor` 和 bucket 局部迭代。
+- 适合跨进程共享 key/value 索引，同时保持比有序 map 更接近哈希表的查找语义。
 
 ### SharedMemoryMap
 

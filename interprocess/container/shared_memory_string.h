@@ -3,6 +3,7 @@
 #include "../allocator/offset_ptr.h"
 #include "../allocator/shared_memory_allocator.h"
 #include <cstddef>
+#include <functional>
 #include <ostream>
 #include <string>
 
@@ -250,6 +251,16 @@ public:
         return size() == s.size() && Traits::compare(c_str(), s.data(), s.size()) == 0;
     }
 
+    bool operator==(const BasicSharedMemoryString& other) const
+    {
+        return size() == other.size() && Traits::compare(c_str(), other.c_str(), size()) == 0;
+    }
+
+    bool operator!=(const BasicSharedMemoryString& other) const
+    {
+        return !(*this == other);
+    }
+
     bool operator<(const BasicSharedMemoryString& other) const
     {
         const size_type lhs_size = size();
@@ -331,3 +342,24 @@ private:
 using SharedMemoryString = BasicSharedMemoryString<char>;
 
 } // namespace interprocess
+
+namespace std
+{
+
+template <typename CharT, typename Traits, typename Allocator>
+struct hash<interprocess::BasicSharedMemoryString<CharT, Traits, Allocator>>
+{
+    std::size_t operator()(
+        const interprocess::BasicSharedMemoryString<CharT, Traits, Allocator>& value) const noexcept
+    {
+        std::size_t result = 1469598103934665603ull;
+        for (std::size_t i = 0; i < value.size(); ++i)
+        {
+            result ^= static_cast<unsigned char>(value.data()[i]);
+            result *= 1099511628211ull;
+        }
+        return result;
+    }
+};
+
+} // namespace std

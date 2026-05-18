@@ -130,6 +130,8 @@ set(SHM_NEXT_CTEST_TARGETS
     shm_open_or_create
     shm_manager_lifecycle
     shm_container_stl_semantics
+    shm_list_hash_compile_smoke
+    shm_list_hash_cross_process
     shm_map_perf_compare
     shm_vector_perf_compare
     shm_allocator_fragmentation
@@ -198,6 +200,15 @@ add_producer_consumer_test(
     background
     "Starting to produce sensor data"
     120
+)
+
+add_producer_consumer_test(
+    shm_list_hash_producer_consumer
+    shm_list_hash_producer
+    shm_list_hash_consumer
+    background
+    "Shared list/hash ready"
+    60
 )
 
 if(TEST shm_allocator_fragmentation)

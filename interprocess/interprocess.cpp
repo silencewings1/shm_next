@@ -2,6 +2,8 @@
 #include "allocator/shared_memory_allocator.h"
 #include "allocator/shared_memory_manager.h"
 #include "container/shared_memory_map.h"
+#include "container/shared_memory_hash_map.h"
+#include "container/shared_memory_list.h"
 #include "container/shared_memory_string.h"
 #include "container/shared_memory_vector.h"
 #include "ipc/managed_shared_memory.h"

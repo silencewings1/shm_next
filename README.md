@@ -2,7 +2,7 @@
 
 `shm_next` 是一个不依赖 Boost 的轻量级 POSIX shared memory 组件集。它参考了 Boost.Interprocess 的核心模型，但只保留当前工程需要的能力：共享内存段管理、段内分配器、命名对象、共享内存友好容器和跨进程同步原语。
 
-当前实现适合用来在多个进程之间共享 C++ 对象、字符串、顺序容器、有序 map 和自定义根对象。容器本身不内建业务锁，调用方需要用共享内存中的 `InterprocessMutex` 或其他同步原语保护并发读写。
+当前实现适合用来在多个进程之间共享 C++ 对象、字符串、顺序容器、链表、哈希表、有序 map 和自定义根对象。容器本身不内建业务锁，调用方需要用共享内存中的 `InterprocessMutex` 或其他同步原语保护并发读写。
 
 新读者建议先看 [shm_next 设计文档](docs/design_for_beginners.md)，它按学习路线、模块分层、内存布局、对象生命周期、allocator、只读快照和测试入口系统解释工程设计。
 
@@ -17,7 +17,7 @@
 - 管理型共享内存入口：`ManagedSharedMemory` 支持 `create_only`、`open_only`、`open_or_create`、`open_read_only`。
 - 段内分配器：`SharedMemoryManager` + `SharedMemoryAllocator<T>`。
 - 命名对象：`construct`、`find`、`find_or_construct`、数组构造、`destroy`、`destroy_ptr`。
-- 共享内存容器：`SharedMemoryString`、`SharedMemoryVector<T>`、`SharedMemoryMap<K,V>`。
+- 共享内存容器：`SharedMemoryString`、`SharedMemoryVector<T>`、`SharedMemoryList<T>`、`SharedMemoryMap<K,V>`、`SharedMemoryHashMap<K,V>`。
 - 跨进程同步：mutex、condition、semaphore，mutex 在支持的平台启用 robust owner-dead 语义。
 - 稳健性检查：allocator sanity、double-free 检测、非法指针检测、初始化状态机、崩溃构造清理。
 - 性能辅助：`allocate_many`、`deallocate_many`、`try_expand`、vector/string 原地扩容、map node cache。
@@ -37,7 +37,10 @@ interprocess/
   container/
     shared_memory_string.h
     shared_memory_vector.h
+    shared_memory_list.h
     shared_memory_map.h
+    shared_memory_hash_map.h
+    detail/shared_memory_hash_table.h
     detail/shared_memory_rbtree_map.h
   ipc/
     managed_shared_memory.h
