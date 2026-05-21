@@ -5,29 +5,12 @@
 - 单条写入：`push_back`
 - 单条读取：原地读取 `at`，以及拷贝读取 `operator[] + memcpy` / `fetch`
 
-## 运行环境
-
-所有结果均在同一台远程 Linux 服务器上运行，避免本地 macOS 与远程 Linux 混用导致结果不可比。
-
-```text
-host: ospacer@10.211.55.4
-uname: Linux flow 5.4.0-216-generic #236-Ubuntu SMP Fri Apr 11 19:53:21 UTC 2025 x86_64
-run time: 2026-05-14 16:57:01 CST
-```
-
-项目路径：
-
-| 项目 | 远程路径 | 说明 |
-| --- | --- | --- |
-| `shm_next` | `/home/ospacer/cpp_test/shm_next` | 本地 `/Users/ospacer/opensource/shm_next` 同步后的辅助测试副本 |
-| `shm` | `/home/ospacer/sse/framework/shm` | 参考项目，以远程该路径代码为准 |
-
 ## 测试代码
 
 | 项目 | 测试文件 |
 | --- | --- |
-| `shm_next` | `/Users/ospacer/opensource/shm_next/test/shm_vector_perf_compare.cpp` |
-| `shm` | `/Users/ospacer/sse/qip/shm/test/shm/object/VectorPerfCompareTest.cpp` |
+| `shm_next` | `test/container/compare/shm_vector_perf_compare.cpp` |
+| `shm` | `test/shm/object/VectorPerfCompareTest.cpp` |
 
 ## 测试口径
 
@@ -59,26 +42,10 @@ record_bytes=64
 
 ### shm_next
 
-同步本地代码到远程辅助测试路径：
-
-```bash
-rsync -az --delete \
-  --exclude '.git/' \
-  --exclude 'build/' \
-  --exclude 'cmake-build*/' \
-  --exclude '*.o' \
-  --exclude '*.a' \
-  --exclude '*.so' \
-  --exclude '*.gcda' \
-  --exclude '*.gcno' \
-  /Users/ospacer/opensource/shm_next/ \
-  ospacer@10.211.55.4:/home/ospacer/cpp_test/shm_next/
-```
-
 远程编译与运行：
 
 ```bash
-cd /home/ospacer/cpp_test/shm_next
+cd <remote-shm_next-workspace>
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j 4 --target shm_vector_perf_compare
@@ -91,7 +58,7 @@ cmake --build build -j 4 --target shm_vector_perf_compare
 参考项目位于：
 
 ```bash
-cd /home/ospacer/sse/framework/shm
+cd <remote-shm-reference-workspace>
 ```
 
 远程编译与运行：
@@ -99,7 +66,7 @@ cd /home/ospacer/sse/framework/shm
 ```bash
 cmake -S . -B build \
   -DSHM_BUILD_TESTS=ON \
-  -DFRAME_INCLUDE_OUTPUT_PATH=/home/ospacer/sse/framework/shm/build/frame_include \
+  -DFRAME_INCLUDE_OUTPUT_PATH=<remote-shm-reference-workspace>/build/frame_include \
   -DCMAKE_CXX_FLAGS="-std=c++17"
 
 cmake --build build -j 4 --target gtshm20

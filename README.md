@@ -10,6 +10,7 @@
 
 - [Vector 性能对比](docs/vector_performance_comparison.md)
 - [Map 性能对比](docs/map_performance_comparison.md)
+- [List 性能对比](docs/list_performance_comparison.md)
 
 ## 核心能力
 
