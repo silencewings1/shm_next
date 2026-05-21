@@ -22,7 +22,7 @@
 - 跨进程同步：mutex、condition、semaphore，mutex 在支持的平台启用 robust owner-dead 语义。
 - 稳健性检查：allocator sanity、double-free 检测、非法指针检测、初始化状态机、崩溃构造清理。
 - 性能辅助：`allocate_many`、`deallocate_many`、`try_expand`、vector/string 原地扩容、map node cache。
-- CTest 覆盖：基础同步、生命周期、崩溃恢复、只读快照、多进程并发、allocator 碎片和 producer/consumer 集成场景。
+- CTest 覆盖：按模块分类的容器接口、多进程加锁、嵌套容器、allocator、IPC、同步原语、benchmark、性能对比和 producer/consumer 集成场景。
 
 ## 目录结构
 
@@ -52,7 +52,47 @@ interprocess/
     posix_condition.h
     posix_semaphore.h
 test/
-  shm_* test and sample programs
+  CMakeLists.txt
+  container/
+    string/
+      shm_string_test.cpp
+      shm_string_producer.cpp
+      shm_string_consumer.cpp
+      shm_string_benchmark.cpp
+    vector/
+      shm_vector_test.cpp
+      shm_vector_producer.cpp
+      shm_vector_consumer.cpp
+      shm_vector_benchmark.cpp
+    list/
+      shm_list_test.cpp
+      shm_list_producer.cpp
+      shm_list_consumer.cpp
+      shm_list_benchmark.cpp
+    map/
+      shm_map_test.cpp
+      shm_map_producer.cpp
+      shm_map_consumer.cpp
+      shm_map_benchmark.cpp
+    hash_map/
+      shm_hash_map_test.cpp
+      shm_hash_map_producer.cpp
+      shm_hash_map_consumer.cpp
+      shm_hash_map_benchmark.cpp
+    nested/
+      nested_*_test.cpp
+      shm_concurrent_process_stress_test.cpp
+    compare/
+      shm_benchmark.cpp
+      shm_vector_perf_compare.cpp
+      shm_map_perf_compare.cpp
+      shm_list_perf_compare.cpp
+  allocator/
+    shm_*_test.cpp
+  ipc/
+    shm_*_test.cpp
+  sync/
+    shm_*_test.cpp
 ```
 
 ## 类图与流程图
@@ -120,7 +160,9 @@ classDiagram
 
     class SharedMemoryString
     class SharedMemoryVector
+    class SharedMemoryList
     class SharedMemoryMap
+    class SharedMemoryHashMap
     class InterprocessMutex
     class InterprocessCondition
     class InterprocessSemaphore
@@ -133,10 +175,14 @@ classDiagram
     SharedMemoryAllocator --> SharedMemoryManager
     SharedMemoryString --> SharedMemoryAllocator
     SharedMemoryVector --> SharedMemoryAllocator
+    SharedMemoryList --> SharedMemoryAllocator
     SharedMemoryMap --> SharedMemoryAllocator
+    SharedMemoryHashMap --> SharedMemoryAllocator
     SharedMemoryString *-- OffsetPtr
     SharedMemoryVector *-- OffsetPtr
+    SharedMemoryList *-- OffsetPtr
     SharedMemoryMap *-- OffsetPtr
+    SharedMemoryHashMap *-- OffsetPtr
     SharedMemoryManager *-- InterprocessMutex
     InterprocessCondition --> InterprocessMutex
     InterprocessSemaphore *-- InterprocessMutex
@@ -157,16 +203,22 @@ flowchart LR
     Root --> UserMutex["InterprocessMutex"]
     Root --> String["SharedMemoryString"]
     Root --> Vector["SharedMemoryVector"]
+    Root --> List["SharedMemoryList"]
     Root --> Map["SharedMemoryMap"]
+    Root --> HashMap["SharedMemoryHashMap"]
 
     Allocator --> Blocks["allocated/free blocks"]
     Blocks --> StringBuffer["string buffer"]
     Blocks --> VectorBuffer["vector element buffer"]
+    Blocks --> ListNodes["list nodes"]
     Blocks --> MapNodes["map tree nodes"]
+    Blocks --> HashMapNodes["hash_map buckets/nodes"]
 
     StringBuffer -. "OffsetPtr" .-> String
     VectorBuffer -. "OffsetPtr" .-> Vector
+    ListNodes -. "OffsetPtr" .-> List
     MapNodes -. "OffsetPtr" .-> Map
+    HashMapNodes -. "OffsetPtr" .-> HashMap
 ```
 
 ### 创建、打开与只读快照流程
@@ -503,35 +555,56 @@ cmake --build build -j 8
 ctest --test-dir build --output-on-failure
 ```
 
-当前注册测试：
+当前测试目录与 CMake 组织方式：
 
 ```text
-shm_semaphore
-shm_mutex_robust
-shm_open_or_create
-shm_manager_lifecycle
-shm_allocator_fragmentation
-shm_concurrent_process_stress
-shm_crash_recovery_complex
-shm_read_only_snapshot
-shm_string_producer_consumer
-shm_nested_producer_consumer
-shm_map_producer_consumer
-shm_vector_producer_consumer
+顶层 CMakeLists.txt
+  ├── add_subdirectory(interprocess)
+  └── add_subdirectory(test)
+
+interprocess/CMakeLists.txt
+  └── 负责 shm_next::interprocess 静态库与头文件导出
+
+test/CMakeLists.txt
+  ├── 递归收集 test/**/*.cpp
+  ├── 用相对路径生成唯一 target 名
+  ├── 注册功能 / nested / allocator / ipc / sync / benchmark / compare 测试
+  └── 注册 producer/consumer 集成测试
 ```
 
-只运行复杂场景：
+当前 CTest 分类覆盖：
+
+- `test/container/string|vector|list|map|hash_map/`
+  - `shm_<container>_test.cpp`：接口功能 + 多进程加锁读写
+  - `shm_<container>_producer.cpp` / `shm_<container>_consumer.cpp`
+  - `shm_<container>_benchmark.cpp`：常用接口大量读写与耗时统计
+- `test/container/nested/`
+  - 两两嵌套功能测试，覆盖 `vector/list/map/hash_map` 双向组合
+  - `string` 仅作为内层元素参与嵌套
+  - 额外包含矩阵测试和跨进程冲突压力测试
+- `test/container/compare/`
+  - `shm_vector_perf_compare.cpp`
+  - `shm_map_perf_compare.cpp`
+  - `shm_list_perf_compare.cpp`
+  - `shm_benchmark.cpp`
+- `test/allocator/`
+  - allocator 基础、碎片化、manager 生命周期、offset_ptr
+- `test/ipc/`
+  - open/create、只读快照、崩溃恢复、shared memory object、mapped region
+- `test/sync/`
+  - mutex、condition、semaphore
+
+只运行某类测试：
 
 ```sh
-ctest --test-dir build -L complex --output-on-failure
+ctest --test-dir build -L container --output-on-failure
+ctest --test-dir build -L nested --output-on-failure
+ctest --test-dir build -L allocator --output-on-failure
+ctest --test-dir build -L ipc --output-on-failure
+ctest --test-dir build -L sync --output-on-failure
+ctest --test-dir build -L benchmark --output-on-failure
+ctest --test-dir build -L compare --output-on-failure
 ```
-
-复杂场景覆盖：
-
-- `shm_allocator_fragmentation`：碎片化分配、批量分配、原地扩容、sanity。
-- `shm_concurrent_process_stress`：多进程打开同一段，锁保护下更新 vector/map/counter。
-- `shm_crash_recovery_complex`：子进程持锁退出，父进程检测 owner-dead 并恢复业务状态。
-- `shm_read_only_snapshot`：只读映射读取 string/vector，确认写 API 被拒绝。
 
 只运行 producer/consumer 集成场景：
 
@@ -541,25 +614,29 @@ ctest --test-dir build -L producer --output-on-failure
 
 producer/consumer 集成场景覆盖：
 
-- `shm_string_producer_consumer`：字符串 root object 的生产和消费。
-- `shm_nested_producer_consumer`：嵌套 vector/string 容器跨进程读取。
-- `shm_map_producer_consumer`：map 插入、更新、删除、区间查询和迭代顺序。
-- `shm_vector_producer_consumer`：带业务锁的 sensor vector 持续生产和消费。
+- `string_producer_consumer`：字符串 root object 的生产和消费。
+- `vector_producer_consumer`：带业务锁的 vector 持续生产和消费。
+- `list_producer_consumer`：链表跨进程生产、消费和顺序校验。
+- `map_producer_consumer`：map 插入、更新、删除、区间查询和迭代顺序。
+- `hash_map_producer_consumer`：hash map 插入、覆盖、遍历和查找校验。
 
 这些用例由 `cmake/run_producer_consumer_pair.sh` 组织。需要交互回车的 producer 会通过 FIFO 自动结束，长时间运行的 producer 会在输出 ready 日志后启动 consumer。
 
-性能 smoke benchmark：
+运行单个 benchmark / compare 可执行程序示例：
 
 ```sh
-./build/shm_benchmark
+./build/test_container_string_shm_string_benchmark
+./build/test_container_vector_shm_vector_benchmark
+./build/test_container_compare_shm_benchmark
+./build/test_container_compare_shm_vector_perf_compare
 ```
 
-它会输出 allocator、`allocate_many`、map insert/find/erase 的简单耗时指标，仅用于观察趋势，不作为稳定性能基准。
+这些程序会输出容器常用接口或跨组件对比的耗时指标，用于趋势观察和回归对比，不作为严格稳定性能基准。
 
 ## 使用约束
 
 - 放进共享内存的对象不能持有进程私有资源指针。
-- 容器成员应使用共享内存友好类型，例如 `SharedMemoryString`、`SharedMemoryVector`、`SharedMemoryMap`。
+- 容器成员应使用共享内存友好类型，例如 `SharedMemoryString`、`SharedMemoryVector`、`SharedMemoryList`、`SharedMemoryMap`、`SharedMemoryHashMap`。
 - 不要把 `std::string`、`std::vector`、普通裸指针直接作为跨进程共享对象成员，除非它们只保存进程本地临时状态。
 - 容器不自带业务锁。多进程并发读写必须由调用方同步。
 - `open_read_only` 会检测 manager 元数据是否稳定；业务对象内容如果仍有 writer 并发修改，需要额外同步协议。

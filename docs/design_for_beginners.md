@@ -11,7 +11,7 @@
 - 创建和打开 POSIX shared memory。
 - 在共享内存段内部做内存分配。
 - 用名字管理共享对象，例如 `"RootObject"`。
-- 使用共享内存友好的字符串、vector、map。
+- 使用共享内存友好的字符串、vector、list、map、hash_map。
 - 使用跨进程 mutex、condition、semaphore 做同步。
 - 支持只读映射，适合快照式读取。
 - 支持 robust mutex owner-dead 检测、初始化状态机、崩溃构造清理等稳健性机制。
@@ -62,7 +62,9 @@ flowchart TD
 
     String --> OffsetPtr["OffsetPtr<T>"]
     Vector --> OffsetPtr
+    List --> OffsetPtr
     Map --> OffsetPtr
+    HashMap --> OffsetPtr
 
     Condition["InterprocessCondition"] --> ManagerMutex
     Semaphore["InterprocessSemaphore"] --> Condition
@@ -77,15 +79,15 @@ flowchart TD
 | 分配器 | `interprocess/allocator/detail/shared_memory_block_allocator.h` | 在共享内存段内部分配和释放字节块 |
 | STL allocator 适配 | `interprocess/allocator/shared_memory_allocator.h` | 给容器提供 `allocate` / `deallocate` / `construct` |
 | 指针模型 | `interprocess/allocator/offset_ptr.h` | 用相对偏移表示共享内存内的指针 |
-| 容器 | `interprocess/container/*.h` | shared-memory-aware string/vector/map |
+| 容器 | `interprocess/container/*.h` | shared-memory-aware string/vector/list/map/hash_map |
 | 同步 | `interprocess/sync/*.h` | 跨进程 mutex、condition、semaphore |
-| 测试和样例 | `test/*.cpp` | 生命周期、崩溃恢复、只读快照、并发、benchmark |
+| 测试和样例 | `test/**` | 按 container/allocator/ipc/sync 分类的功能、跨进程、benchmark、compare 测试 |
 
 ## 4. 推荐学习路线
 
 如果你是第一次看这个工程，建议按这个顺序读：
 
-1. `test/shm_open_or_create.cpp`
+1. `test/ipc/shm_open_or_create_test.cpp`
    了解最小的创建、打开、命名对象使用方式。
 
 2. `interprocess/ipc/managed_shared_memory.h`
@@ -100,14 +102,17 @@ flowchart TD
 5. `interprocess/allocator/detail/shared_memory_block_allocator.h`
    看段内分配器如何维护 free list。
 
-6. `interprocess/container/shared_memory_string.h` 和 `shared_memory_vector.h`
-   看容器如何使用 allocator 和 `OffsetPtr`。
+6. `interprocess/container/shared_memory_string.h`、`shared_memory_vector.h`、`shared_memory_list.h`、`shared_memory_hash_map.h`
+   看容器如何使用 allocator 和 `OffsetPtr`，以及顺序容器 / 链表 / 哈希容器在共享内存中的差异。
 
-7. `test/shm_manager_lifecycle.cpp`
+7. `test/allocator/shm_manager_lifecycle_test.cpp`
    这是最综合的生命周期测试，可以当作行为规格读。
 
-8. `test/shm_read_only_snapshot.cpp`、`test/shm_crash_recovery_complex.cpp`
+8. `test/ipc/shm_read_only_snapshot_test.cpp`、`test/ipc/shm_crash_recovery_complex_test.cpp`
    分别理解只读快照和崩溃恢复。
+
+9. `test/container/nested/`
+   看各个公开容器两两嵌套、跨进程打开和外层锁保护下的冲突场景。
 
 ## 5. 共享内存段内布局
 
@@ -128,7 +133,7 @@ flowchart LR
     Blocks --> FreeBlocks["free blocks"]
     Blocks --> UsedBlocks["allocated blocks"]
     UsedBlocks --> Root["RootObject"]
-    UsedBlocks --> Buffer["vector/string/map buffers"]
+    UsedBlocks --> Buffer["string/vector/list/map/hash_map buffers or nodes"]
 ```
 
 `SharedMemoryManager` 放在共享内存段开头。它内部包含：
@@ -556,22 +561,67 @@ macOS 上 POSIX shm 二次调整大小可能受限，所以测试覆盖了失败
 
 ## 16. 测试如何对应设计
 
-| 测试 | 覆盖重点 |
-| --- | --- |
-| `shm_open_or_create` | 创建、打开、重复打开语义 |
-| `shm_manager_lifecycle` | 命名对象、数组、异常回滚、类型校验、只读访问、grow/shrink |
-| `shm_allocator_fragmentation` | allocator 碎片、批量分配、原地扩容、sanity |
-| `shm_concurrent_process_stress` | 多进程共享容器和业务锁 |
-| `shm_crash_recovery_complex` | robust mutex owner-dead 和业务恢复 |
-| `shm_read_only_snapshot` | 只读映射、只读 API、类型校验 |
-| `shm_mutex_robust` | robust mutex 行为 |
-| `shm_semaphore` | semaphore 和 condition 基础同步 |
-| `shm_string_producer_consumer` | string producer/consumer 集成流程 |
-| `shm_nested_producer_consumer` | 嵌套容器 producer/consumer 集成流程 |
-| `shm_map_producer_consumer` | map producer/consumer 集成流程 |
-| `shm_vector_producer_consumer` | 带业务锁的 vector producer/consumer 集成流程 |
+测试目录已经按源码模块拆开，便于把“行为规格”和“代码结构”一一对应：
 
-`shm_benchmark` 会被构建成可执行程序，但不注册为 CTest。它用于 allocator、`allocate_many`、map insert/find/erase 的性能趋势观察，不作为稳定性能基准。
+```text
+test/
+  container/
+    string|vector|list|map|hash_map/
+    nested/
+    compare/
+  allocator/
+  ipc/
+  sync/
+```
+
+其中：
+
+- 每个公开容器目录固定有 4 类文件：
+  - `shm_<container>_test.cpp`：接口功能 + 多进程加锁读写
+  - `shm_<container>_producer.cpp`
+  - `shm_<container>_consumer.cpp`
+  - `shm_<container>_benchmark.cpp`
+- `test/container/nested/` 覆盖 5 个公开容器的两两嵌套策略：
+  - `string` 只作为内层元素
+  - 非 string 容器按双向嵌套成对测试，例如 `vector<map>` 与 `map<int, vector>`
+- `test/container/compare/` 保留和另一套共享内存组件的接口/性能比较程序
+- `test/allocator/`、`test/ipc/`、`test/sync/` 与源码目录保持一致
+
+核心测试与设计对应关系如下：
+
+| 测试路径 / 类型 | 覆盖重点 |
+| --- | --- |
+| `test/ipc/shm_open_or_create_test.cpp` | 创建、打开、重复打开语义 |
+| `test/allocator/shm_manager_lifecycle_test.cpp` | 命名对象、数组、异常回滚、类型校验、只读访问、grow/shrink |
+| `test/allocator/shm_allocator_fragmentation_test.cpp` | allocator 碎片、批量分配、原地扩容、sanity |
+| `test/allocator/shm_offset_ptr_test.cpp` | `OffsetPtr` 偏移语义、空指针、跨对象转换 |
+| `test/ipc/shm_crash_recovery_complex_test.cpp` | robust mutex owner-dead 和业务恢复 |
+| `test/ipc/shm_read_only_snapshot_test.cpp` | 只读映射、只读 API、类型校验 |
+| `test/ipc/shm_shared_memory_object_test.cpp` | POSIX shm 对象尺寸、unlink、基础文件语义 |
+| `test/ipc/shm_mapped_region_test.cpp` | `mmap`/`munmap`/flush 与只读只写映射边界 |
+| `test/sync/shm_mutex_robust_test.cpp` | robust mutex 行为 |
+| `test/sync/shm_condition_test.cpp` | condition wait/notify、超时与跨进程配合 |
+| `test/sync/shm_semaphore_test.cpp` | semaphore 和 condition 基础同步 |
+| `test/container/string/shm_string_test.cpp` | string 接口、扩容、跨进程读写 |
+| `test/container/vector/shm_vector_test.cpp` | vector 接口、原地扩容、跨进程读写 |
+| `test/container/list/shm_list_test.cpp` | list 接口、节点搬移、排序/去重、跨进程读写 |
+| `test/container/map/shm_map_test.cpp` | 有序 map 插入、删除、查找、遍历、缓存节点 |
+| `test/container/hash_map/shm_hash_map_test.cpp` | hash_map 插入、覆盖、rehash、bucket/local iterator |
+| `test/container/nested/nested_*_test.cpp` | 各容器两两嵌套、跨进程打开校验、外层锁冲突场景 |
+| `test/container/nested/nested_container_matrix_test.cpp` | 批量矩阵式验证嵌套组合可构造、可读回、可销毁 |
+| `test/container/nested/shm_concurrent_process_stress_test.cpp` | 多进程共享容器和业务锁压力测试 |
+| `string_producer_consumer` | string producer/consumer 集成流程 |
+| `vector_producer_consumer` | 带业务锁的 vector producer/consumer 集成流程 |
+| `list_producer_consumer` | list producer/consumer 集成流程 |
+| `map_producer_consumer` | map producer/consumer 集成流程 |
+| `hash_map_producer_consumer` | hash_map producer/consumer 集成流程 |
+
+benchmark / compare 程序当前也已注册进 CTest，并通过 label 做分类：
+
+- `benchmark`：容器 benchmark 与 compare 程序
+- `compare`：`test/container/compare/*.cpp`
+- `container` / `nested` / `allocator` / `ipc` / `sync`
+- `producer;consumer;integration`
 
 运行全部 CTest：
 
@@ -589,10 +639,16 @@ cmake --build build-debug -j 8
 ctest --test-dir build-debug --output-on-failure
 ```
 
-只运行复杂场景：
+只运行某类测试：
 
 ```sh
-ctest --test-dir build -L complex --output-on-failure
+ctest --test-dir build -L container --output-on-failure
+ctest --test-dir build -L nested --output-on-failure
+ctest --test-dir build -L allocator --output-on-failure
+ctest --test-dir build -L ipc --output-on-failure
+ctest --test-dir build -L sync --output-on-failure
+ctest --test-dir build -L benchmark --output-on-failure
+ctest --test-dir build -L compare --output-on-failure
 ```
 
 只运行 producer/consumer 集成场景：
@@ -602,6 +658,15 @@ ctest --test-dir build -L producer --output-on-failure
 ```
 
 producer/consumer CTest 由 `cmake/run_producer_consumer_pair.sh` 组织。脚本会先启动 producer，等待 ready 日志，再启动 consumer；需要回车退出的 producer 会通过 FIFO 自动接收换行并清理共享内存。
+
+如果需要直接运行单个 benchmark / compare 可执行程序，可以使用按相对路径生成的 target 名，例如：
+
+```sh
+./build/test_container_string_shm_string_benchmark
+./build/test_container_list_shm_list_benchmark
+./build/test_container_compare_shm_vector_perf_compare
+./build/test_container_compare_shm_benchmark
+```
 
 ## 17. 常见使用模式
 
@@ -652,7 +717,7 @@ producer 创建段和 root object，consumer 使用 `open_only` 打开段并按�
 使用本工程时需要记住这些规则：
 
 - 放进共享内存的对象不能保存进程私有资源指针。
-- 容器成员要使用 shared-memory-aware 容器，而不是普通 `std::string` / `std::vector`。
+- 容器成员要使用 shared-memory-aware 容器，而不是普通 `std::string` / `std::vector` / `std::list` / `std::map` / `std::unordered_map`。
 - 命名对象的 `find<T>` / `destroy<T>` 类型必须和创建时一致。
 - 多进程并发修改业务对象时必须加业务锁。
 - 只读 API 只能保证 manager 元数据快照一致，不能自动保证业务对象内容一致。
