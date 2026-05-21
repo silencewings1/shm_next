@@ -1,0 +1,8 @@
+#include "nested_test_common.h"
+#include "interprocess/container/shared_memory_list.h"
+#include "interprocess/container/shared_memory_vector.h"
+#include "interprocess/sync/posix_mutex.h"
+#include <mutex>
+using namespace interprocess; using IntList=SharedMemoryList<int>; using IntVec=SharedMemoryVector<int>; using VecList=SharedMemoryVector<IntList>; using ListVec=SharedMemoryList<IntVec>;
+struct Root{InterprocessMutex mutex; VecList vector_of_list; ListVec list_of_vector; Root(const SharedMemoryAllocator<IntList>& a,const SharedMemoryAllocator<IntVec>& b):vector_of_list(a),list_of_vector(b){}};
+int main(){std::string name="nested_vector_list_"+std::to_string(getpid()); ManagedSharedMemory::remove(name.c_str()); try{ManagedSharedMemory seg(create_only,name.c_str(),512*1024); auto* r=seg.construct<Root>("RootObject",seg.get_allocator<IntList>(),seg.get_allocator<IntVec>()); auto ia=seg.get_allocator<int>(); {std::lock_guard<InterprocessMutex> lock(r->mutex); auto& l=r->vector_of_list.emplace_back(ia); l.assign({1,2,3}); auto& v=r->list_of_vector.emplace_back(ia); v.push_back(4); v.push_back(5);} auto validate=[](Root& root){return root.vector_of_list.size()==1&&root.vector_of_list[0].back()==3&&root.list_of_vector.front().size()==2&&root.list_of_vector.front()[1]==5;}; if(!nested_run_lock_and_reader<Root>(name,validate)) return 1; bool ok=seg.get_segment_manager()->check_sanity(); seg.destroy<Root>("RootObject"); ManagedSharedMemory::remove(name.c_str()); if(!ok)return 1; std::cout<<"[nested_vector_list_test] SUCCESS"<<std::endl; return 0;}catch(...){ManagedSharedMemory::remove(name.c_str()); return 1;}}

@@ -1,0 +1,8 @@
+#include "nested_test_common.h"
+#include "interprocess/container/shared_memory_hash_map.h"
+#include "interprocess/container/shared_memory_list.h"
+#include "interprocess/sync/posix_mutex.h"
+#include <mutex>
+using namespace interprocess; using IntHash=SharedMemoryHashMap<int,int>; using IntList=SharedMemoryList<int>; using ListHash=SharedMemoryList<IntHash>; using HashList=SharedMemoryHashMap<int,IntList>;
+struct Root{InterprocessMutex mutex; ListHash list_of_hash; HashList hash_of_list; Root(const SharedMemoryAllocator<IntHash>& a,const SharedMemoryAllocator<std::pair<const int,IntList>>& b):list_of_hash(a),hash_of_list(8,std::hash<int>{},std::equal_to<int>{},b){}};
+int main(){std::string name="nested_list_hash_map_"+std::to_string(getpid()); ManagedSharedMemory::remove(name.c_str()); try{ManagedSharedMemory seg(create_only,name.c_str(),512*1024); auto* r=seg.construct<Root>("RootObject",seg.get_allocator<IntHash>(),seg.get_allocator<std::pair<const int,IntList>>()); auto ha=seg.get_allocator<std::pair<const int,int>>(); auto ia=seg.get_allocator<int>(); {std::lock_guard<InterprocessMutex> lock(r->mutex); auto& h=r->list_of_hash.emplace_back(8,ha); h.try_emplace(1,11); IntList l(ia); l.assign({6,7}); r->hash_of_list.emplace(2,std::move(l));} auto validate=[](Root& root){return root.list_of_hash.front().at(1)==11&&root.hash_of_list.at(2).back()==7;}; if(!nested_run_lock_and_reader<Root>(name,validate)) return 1; bool ok=seg.get_segment_manager()->check_sanity(); seg.destroy<Root>("RootObject"); ManagedSharedMemory::remove(name.c_str()); if(!ok)return 1; std::cout<<"[nested_list_hash_map_test] SUCCESS"<<std::endl; return 0;}catch(...){ManagedSharedMemory::remove(name.c_str()); return 1;}}

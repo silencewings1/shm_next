@@ -1,0 +1,8 @@
+#include "nested_test_common.h"
+#include "interprocess/container/shared_memory_map.h"
+#include "interprocess/container/shared_memory_vector.h"
+#include "interprocess/sync/posix_mutex.h"
+#include <mutex>
+using namespace interprocess; using IntMap=SharedMemoryMap<int,int>; using IntVec=SharedMemoryVector<int>; using VecMap=SharedMemoryVector<IntMap>; using MapVec=SharedMemoryMap<int,IntVec>;
+struct Root{InterprocessMutex mutex; VecMap vector_of_map; MapVec map_of_vector; Root(const SharedMemoryAllocator<IntMap>& a,const SharedMemoryAllocator<std::pair<const int,IntVec>>& b):vector_of_map(a),map_of_vector(b){}};
+int main(){std::string name="nested_vector_map_"+std::to_string(getpid()); ManagedSharedMemory::remove(name.c_str()); try{ManagedSharedMemory seg(create_only,name.c_str(),512*1024); auto* r=seg.construct<Root>("RootObject",seg.get_allocator<IntMap>(),seg.get_allocator<std::pair<const int,IntVec>>()); auto ma=seg.get_allocator<std::pair<const int,int>>(); auto ia=seg.get_allocator<int>(); {std::lock_guard<InterprocessMutex> lock(r->mutex); auto& m=r->vector_of_map.emplace_back(ma); m.try_emplace(1,10); IntVec v(ia); v.push_back(7); v.push_back(8); r->map_of_vector.emplace(2,std::move(v));} auto validate=[](Root& root){return root.vector_of_map[0].at(1)==10&&root.map_of_vector.at(2)[1]==8;}; if(!nested_run_lock_and_reader<Root>(name,validate)) return 1; bool ok=seg.get_segment_manager()->check_sanity(); seg.destroy<Root>("RootObject"); ManagedSharedMemory::remove(name.c_str()); if(!ok)return 1; std::cout<<"[nested_vector_map_test] SUCCESS"<<std::endl; return 0;}catch(...){ManagedSharedMemory::remove(name.c_str()); return 1;}}

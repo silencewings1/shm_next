@@ -1,0 +1,8 @@
+#include "nested_test_common.h"
+#include "interprocess/container/shared_memory_list.h"
+#include "interprocess/container/shared_memory_map.h"
+#include "interprocess/sync/posix_mutex.h"
+#include <mutex>
+using namespace interprocess; using IntMap=SharedMemoryMap<int,int>; using IntList=SharedMemoryList<int>; using ListMap=SharedMemoryList<IntMap>; using MapList=SharedMemoryMap<int,IntList>;
+struct Root{InterprocessMutex mutex; ListMap list_of_map; MapList map_of_list; Root(const SharedMemoryAllocator<IntMap>& a,const SharedMemoryAllocator<std::pair<const int,IntList>>& b):list_of_map(a),map_of_list(b){}};
+int main(){std::string name="nested_list_map_"+std::to_string(getpid()); ManagedSharedMemory::remove(name.c_str()); try{ManagedSharedMemory seg(create_only,name.c_str(),512*1024); auto* r=seg.construct<Root>("RootObject",seg.get_allocator<IntMap>(),seg.get_allocator<std::pair<const int,IntList>>()); auto ma=seg.get_allocator<std::pair<const int,int>>(); auto ia=seg.get_allocator<int>(); {std::lock_guard<InterprocessMutex> lock(r->mutex); auto& m=r->list_of_map.emplace_back(ma); m.try_emplace(1,11); IntList l(ia); l.assign({6,7}); r->map_of_list.emplace(2,std::move(l));} auto validate=[](Root& root){return root.list_of_map.front().at(1)==11&&root.map_of_list.at(2).back()==7;}; if(!nested_run_lock_and_reader<Root>(name,validate)) return 1; bool ok=seg.get_segment_manager()->check_sanity(); seg.destroy<Root>("RootObject"); ManagedSharedMemory::remove(name.c_str()); if(!ok)return 1; std::cout<<"[nested_list_map_test] SUCCESS"<<std::endl; return 0;}catch(...){ManagedSharedMemory::remove(name.c_str()); return 1;}}
