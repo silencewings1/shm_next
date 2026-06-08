@@ -3,6 +3,7 @@
 #include "../diagnostics.h"
 #include "../error.h"
 #include "../sync/posix_mutex.h"
+#include "../sync/posix_shared_mutex.h"
 #include "detail/named_object_registry.h"
 #include "detail/shared_memory_block_allocator.h"
 #include <cerrno>
@@ -29,7 +30,7 @@ class alignas(16) SharedMemoryManager
 {
 public:
     static constexpr uint32_t MAGIC = 0x534D4D34; // "SMM4"
-    static constexpr uint32_t CURRENT_LAYOUT_VERSION = 2;
+    static constexpr uint32_t CURRENT_LAYOUT_VERSION = SHM_NEXT_ENABLE_MANAGER_SHARED_MUTEX ? 3u : 2u;
     static constexpr uint32_t MIN_SUPPORTED_LAYOUT_VERSION = 1;
     static constexpr uint32_t MAX_SUPPORTED_LAYOUT_VERSION = CURRENT_LAYOUT_VERSION;
 
@@ -333,7 +334,7 @@ public:
     T* find(const char* name)
     {
         std::size_t name_length = validate_name(name);
-        return with_manager_lock([&]() -> T* {
+        return with_manager_read_lock([&]() -> T* {
             detail::NamedObjectHeader* curr = named_objects.find_ready(name, name_length);
             if (curr != nullptr)
             {
@@ -347,7 +348,7 @@ public:
     T* find_array(const char* name, std::size_t* count = nullptr)
     {
         std::size_t name_length = validate_name(name);
-        return with_manager_lock([&]() -> T* {
+        return with_manager_read_lock([&]() -> T* {
             detail::NamedObjectHeader* curr = named_objects.find_ready(name, name_length);
             if (curr == nullptr)
             {
@@ -414,17 +415,17 @@ public:
 
     std::size_t get_num_named_objects() const
     {
-        return with_manager_lock([&] { return named_objects.ready_size(); });
+        return with_manager_read_lock([&] { return named_objects.ready_size(); });
     }
 
     std::size_t get_num_total_named_objects() const
     {
-        return with_manager_lock([&] { return named_objects.total_size(); });
+        return with_manager_read_lock([&] { return named_objects.total_size(); });
     }
 
     std::size_t get_reserved_named_objects() const
     {
-        return with_manager_lock([&] { return named_objects.reserved_size(); });
+        return with_manager_read_lock([&] { return named_objects.reserved_size(); });
     }
 
     void reserve_named_objects(std::size_t count)
@@ -440,7 +441,7 @@ public:
     template <typename Func>
     void for_each_named_object(Func&& func) const
     {
-        with_manager_lock([&] {
+        with_manager_read_lock([&] {
             named_objects.for_each([&](const detail::NamedObjectHeader& header) {
                 if (header.state == detail::NamedObjectState::ready)
                 {
@@ -506,17 +507,17 @@ public:
 
     std::size_t get_free_memory() const
     {
-        return with_manager_lock([&] { return block_allocator.get_free_memory(); });
+        return with_manager_read_lock([&] { return block_allocator.get_free_memory(); });
     }
 
     SharedMemoryAllocatorStats get_stats() const
     {
-        return with_manager_lock([&] { return block_allocator.get_stats(); });
+        return with_manager_read_lock([&] { return block_allocator.get_stats(); });
     }
 
     SharedMemoryAllocatorStats get_allocator_stats() const
     {
-        return with_manager_lock([&] { return block_allocator.get_stats(); });
+        return with_manager_read_lock([&] { return block_allocator.get_stats(); });
     }
 
     std::size_t get_size() const noexcept
@@ -536,22 +537,22 @@ public:
 
     bool owns(const void* ptr) const
     {
-        return with_manager_lock([&] { return block_allocator.owns(ptr); });
+        return with_manager_read_lock([&] { return block_allocator.owns(ptr); });
     }
 
     std::size_t allocation_size(const void* ptr) const
     {
-        return with_manager_lock([&] { return block_allocator.allocation_size(ptr); });
+        return with_manager_read_lock([&] { return block_allocator.allocation_size(ptr); });
     }
 
     bool check_sanity() const
     {
-        return with_manager_lock([&] { return check_sanity_unlocked(); });
+        return with_manager_read_lock([&] { return check_sanity_unlocked(); });
     }
 
     bool all_memory_deallocated() const
     {
-        return with_manager_lock([&] { return block_allocator.all_memory_deallocated(); });
+        return with_manager_read_lock([&] { return block_allocator.all_memory_deallocated(); });
     }
 
     void zero_free_memory()
@@ -1031,8 +1032,30 @@ private:
     }
 
     template <typename Func>
-    auto with_manager_lock(Func&& func) const -> std::invoke_result_t<Func>
+    auto with_manager_read_lock(Func&& func) const -> std::invoke_result_t<Func>
     {
+#if SHM_NEXT_ENABLE_MANAGER_SHARED_MUTEX
+        manager_rwlock.lock_shared();
+        try
+        {
+            if constexpr (std::is_void_v<std::invoke_result_t<Func>>)
+            {
+                std::forward<Func>(func)();
+                manager_rwlock.unlock_shared();
+            }
+            else
+            {
+                std::invoke_result_t<Func> result = std::forward<Func>(func)();
+                manager_rwlock.unlock_shared();
+                return result;
+            }
+        }
+        catch (...)
+        {
+            manager_rwlock.unlock_shared();
+            throw;
+        }
+#else
         lock_for_manager_recovery();
         try
         {
@@ -1053,10 +1076,31 @@ private:
             mutex.unlock();
             throw;
         }
+#endif
     }
 
     template <typename Func>
     auto with_manager_write_lock(Func&& func) const -> std::invoke_result_t<Func>
+    {
+#if SHM_NEXT_ENABLE_MANAGER_SHARED_MUTEX
+        manager_rwlock.lock();
+        try
+        {
+            return with_manager_write_lock_under_exclusive_rwlock(std::forward<Func>(func));
+        }
+        catch (...)
+        {
+            manager_rwlock.unlock();
+            throw;
+        }
+#else
+        return with_manager_write_lock_under_exclusive_rwlock(std::forward<Func>(func));
+#endif
+    }
+
+    template <typename Func>
+    auto with_manager_write_lock_under_exclusive_rwlock(Func&& func) const
+        -> std::invoke_result_t<Func>
     {
         lock_for_manager_recovery();
         MetadataWriteGuard metadata_write(*this);
@@ -1067,12 +1111,18 @@ private:
                 std::forward<Func>(func)();
                 metadata_write.finish();
                 mutex.unlock();
+#if SHM_NEXT_ENABLE_MANAGER_SHARED_MUTEX
+                manager_rwlock.unlock();
+#endif
             }
             else
             {
                 std::invoke_result_t<Func> result = std::forward<Func>(func)();
                 metadata_write.finish();
                 mutex.unlock();
+#if SHM_NEXT_ENABLE_MANAGER_SHARED_MUTEX
+                manager_rwlock.unlock();
+#endif
                 return result;
             }
         }
@@ -1140,6 +1190,9 @@ private:
     uint32_t layout_version;
     uint32_t header_size;
     mutable InterprocessMutex mutex;
+#if SHM_NEXT_ENABLE_MANAGER_SHARED_MUTEX
+    mutable InterprocessSharedMutex manager_rwlock;
+#endif
     mutable uint64_t metadata_generation;
     std::size_t total_size;
     detail::SharedMemoryBlockAllocator block_allocator;
@@ -1149,6 +1202,9 @@ private:
         : initialization_state(static_cast<uint32_t>(InitializationState::initializing)), magic(0),
           layout_version(CURRENT_LAYOUT_VERSION),
           header_size(static_cast<uint32_t>(sizeof(SharedMemoryManager))),
+#if SHM_NEXT_ENABLE_MANAGER_SHARED_MUTEX
+          manager_rwlock(),
+#endif
           metadata_generation(0), total_size(total_size), block_allocator(), named_objects()
     {
         named_objects.initialize();

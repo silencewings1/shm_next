@@ -28,6 +28,12 @@ endif()
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
+option(SHM_NEXT_ENABLE_MANAGER_SHARED_MUTEX
+    "Use InterprocessSharedMutex for SharedMemoryManager read/write paths in writable mappings"
+    OFF
+)
+message(STATUS "Manager shared mutex: ${SHM_NEXT_ENABLE_MANAGER_SHARED_MUTEX}")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

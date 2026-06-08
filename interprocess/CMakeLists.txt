@@ -35,6 +35,16 @@ target_link_libraries(shm_next_interprocess
         Threads::Threads
 )
 
+if(SHM_NEXT_ENABLE_MANAGER_SHARED_MUTEX)
+    target_compile_definitions(shm_next_interprocess
+        PUBLIC SHM_NEXT_ENABLE_MANAGER_SHARED_MUTEX=1
+    )
+else()
+    target_compile_definitions(shm_next_interprocess
+        PUBLIC SHM_NEXT_ENABLE_MANAGER_SHARED_MUTEX=0
+    )
+endif()
+
 if(UNIX AND NOT APPLE)
     target_link_libraries(shm_next_interprocess PUBLIC rt)
 endif()

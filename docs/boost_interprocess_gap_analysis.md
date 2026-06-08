@@ -67,7 +67,7 @@
 | 递归 mutex | ✅ | ❌ | 无 `recursive_mutex` |
 | 进程间 condition | ✅ | ✅ | `InterprocessCondition` |
 | 进程间 semaphore | ✅ | ◑ | 用 mutex+condition 模拟，非内核 `sem_t`/POSIX 命名信号量 |
-| 读写锁 / 可升级锁 (`upgradable`/`sharable`) | ✅ | ◑ | 已有 `InterprocessSharedMutex` 业务读写锁；尚无可升级锁，也未用于 manager 内部 |
+| 读写锁 / 可升级锁 (`upgradable`/`sharable`) | ✅ | ◑ | 已有 `InterprocessSharedMutex` 业务读写锁；可通过 `SHM_NEXT_ENABLE_MANAGER_SHARED_MUTEX` 选择性接入 manager 可写映射读路径；尚无可升级锁 |
 | 命名同步原语（`named_mutex` 等） | ✅ | ❌ | 仅匿名（嵌在段内）原语 |
 | 文件锁 `file_lock` | ✅ | ❌ | 无 |
 | 自旋锁 / null_mutex | ✅ | ❌ | 无可选无锁/空锁策略 |
@@ -129,7 +129,7 @@
 
 后续可以考虑：
 
-- 新增 `InterprocessSharedMutex` 先作为用户业务锁提供。
+- 新增 `InterprocessSharedMutex` 先作为用户业务锁提供，并提供可选 manager 读写锁模式用于 benchmark 验证。
 - 再评估 manager 内部是否将可写映射下的 metadata 读操作改为共享锁。
 - `open_read_only` 路径继续保留 metadata generation，不应简单改为 pthread rwlock。
 
@@ -185,7 +185,7 @@
    - `SharedMemoryNodePool` 为固定大小节点提供通用缓存和统计，减少通用分配器调用、锁竞争和碎片。
    - list/map/hash_map 均通过该抽象复用节点，风险小于直接替换全局 free list 算法。
 
-5. **新增 `InterprocessSharedMutex`，先作为用户业务锁提供（已落地）**
+5. **新增 `InterprocessSharedMutex`，并可选接入 manager（已落地）**
    - 基于 `pthread_rwlock_t + PTHREAD_PROCESS_SHARED` 实现跨进程读写锁。
    - 优先提供给用户保护业务对象，实现多 reader / 单 writer 场景。
    - 暂不强行改造 `open_read_only` 路径；只读 mmap 仍使用 metadata generation。
