@@ -62,6 +62,9 @@ function(shm_add_test_labels test_name source_path)
     if(source_path MATCHES "shm_manager_rwlock_benchmark[.]cpp$")
         list(APPEND labels "shared_mutex" "manager_shared_mutex" "benchmark")
     endif()
+    if(source_path MATCHES "shm_synchronized_test[.]cpp$")
+        list(APPEND labels "synchronized" "p1")
+    endif()
 
     if(labels)
         list(REMOVE_DUPLICATES labels)
@@ -157,7 +160,23 @@ shm_register_test_by_path(
     120
 )
 shm_register_test_by_path(
+    "test/container/compare/shm_vector_shared_mutex_perf_compare.cpp"
+    120
+)
+shm_register_test_by_path(
+    "test/container/compare/shm_vector_batch_read_perf_compare.cpp"
+    120
+)
+shm_register_test_by_path(
     "test/container/compare/shm_map_perf_compare.cpp"
+    120
+)
+shm_register_test_by_path(
+    "test/container/compare/shm_map_batch_access_perf_compare.cpp"
+    120
+)
+shm_register_test_by_path(
+    "test/container/compare/shm_hash_map_perf_compare.cpp"
     120
 )
 shm_register_test_by_path(
@@ -274,6 +293,10 @@ shm_register_test_by_path(
 )
 shm_register_test_by_path(
     "test/sync/shm_shared_mutex_test.cpp"
+    30
+)
+shm_register_test_by_path(
+    "test/sync/shm_synchronized_test.cpp"
     30
 )
 shm_register_test_by_path(

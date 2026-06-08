@@ -460,10 +460,15 @@ values->push_back(2);
 跨进程共享对象本身不自动加业务锁。调用方需要把锁也放进共享内存对象里：
 
 ```cpp
+#include "interprocess/sync/synchronized.h"
+
+using SynchronizedString =
+    interprocess::Synchronized<interprocess::SharedMemoryString,
+                               interprocess::InterprocessMutex>;
+
 struct RootObject
 {
-    interprocess::InterprocessMutex mutex;
-    interprocess::SharedMemoryString message;
+    SynchronizedString message;
 
     explicit RootObject(const interprocess::SharedMemoryAllocator<char>& alloc)
         : message(alloc)
@@ -475,10 +480,16 @@ struct RootObject
 读写流程：
 
 ```cpp
-root->mutex.lock();
-root->message = "hello";
-root->mutex.unlock();
+root->message.with_lock([](interprocess::SharedMemoryString& message) {
+    message = "hello";
+});
 ```
+
+`Synchronized<T, Mutex>` 是推荐的业务对象同步包装器：
+
+- `with_lock(fn)` 进入临界区并在异常路径自动释放锁。
+- `lock()` 返回 `LockedRef<T, Mutex>`，适合需要多次访问同一对象的短生命周期代码。
+- 对连续读取 vector 这类场景，可以在一次 `with_lock()` 内批量读取多条数据，显著减少锁次数。
 
 `InterprocessMutex` 基于 `pthread_mutex_t`：
 
@@ -610,6 +621,7 @@ test/
 | `test/ipc/shm_mapped_region_test.cpp` | `mmap`/`munmap`/flush 与只读只写映射边界 |
 | `test/sync/shm_mutex_robust_test.cpp` | robust mutex 行为 |
 | `test/sync/shm_shared_mutex_test.cpp` | 跨进程读写锁、shared/exclusive/timed 语义 |
+| `test/sync/shm_synchronized_test.cpp` | `Synchronized<T, Mutex>`、`with_lock`、异常释放锁和跨进程访问 |
 | `test/sync/shm_condition_test.cpp` | condition wait/notify、超时与跨进程配合 |
 | `test/sync/shm_semaphore_test.cpp` | semaphore 和 condition 基础同步 |
 | `test/container/string/shm_string_test.cpp` | string 接口、扩容、跨进程读写 |
@@ -634,6 +646,7 @@ benchmark / compare 程序当前也已注册进 CTest，并通过 label 做分�
 - `container` / `nested` / `allocator` / `ipc` / `sync`
 - `producer;consumer;integration`
 - `p0`：layout/error/diagnostics/node_pool/shared_mutex P0 能力
+- `p1`：synchronized wrapper 等 P1 易用性和吞吐优化能力
 
 运行全部 CTest：
 

@@ -8,8 +8,10 @@
 
 性能对比文档：
 
+- [优化后性能总览](docs/performance_optimization_summary.md)
 - [Vector 性能对比](docs/vector_performance_comparison.md)
 - [Map 性能对比](docs/map_performance_comparison.md)
+- [HashMap 性能对比](docs/hash_map_performance_comparison.md)
 - [List 性能对比](docs/list_performance_comparison.md)
 
 ## 核心能力
@@ -22,6 +24,7 @@
 - 命名对象：`construct`、`find`、`find_or_construct`、数组构造、`destroy`、`destroy_ptr`。
 - 共享内存容器：`SharedMemoryString`、`SharedMemoryVector<T>`、`SharedMemoryList<T>`、`SharedMemoryMap<K,V>`、`SharedMemoryHashMap<K,V>`。
 - 跨进程同步：mutex、shared mutex、condition、semaphore，mutex 在支持的平台启用 robust owner-dead 语义。
+- 同步包装器：`with_lock`、`LockedRef<T, Mutex>`、`Synchronized<T, Mutex>`，用于 RAII 加锁和批量访问。
 - 稳健性检查：allocator sanity、double-free 检测、非法指针检测、初始化状态机、崩溃构造清理。
 - 性能辅助：`allocate_many`、`deallocate_many`、`try_expand`、vector/string 原地扩容、map node cache。
 - CTest 覆盖：按模块分类的容器接口、多进程加锁、嵌套容器、allocator、IPC、同步原语、benchmark、性能对比和 producer/consumer 集成场景。
@@ -56,6 +59,7 @@ interprocess/
     posix_shared_mutex.h
     posix_condition.h
     posix_semaphore.h
+    synchronized.h
 test/
   CMakeLists.txt
   container/
@@ -437,13 +441,15 @@ const RootObject* root = snapshot.find_read_only<RootObject>("RootObject");
 #include "interprocess/container/shared_memory_string.h"
 #include "interprocess/ipc/managed_shared_memory.h"
 #include "interprocess/sync/posix_mutex.h"
+#include "interprocess/sync/synchronized.h"
 
 using namespace interprocess;
 
+using SynchronizedString = Synchronized<SharedMemoryString, InterprocessMutex>;
+
 struct RootObject
 {
-    InterprocessMutex mutex;
-    SharedMemoryString message;
+    SynchronizedString message;
 
     explicit RootObject(const SharedMemoryAllocator<char>& char_allocator)
         : message(char_allocator)
@@ -459,9 +465,9 @@ int main()
     RootObject* root =
         segment.construct<RootObject>("RootObject", segment.get_allocator<char>());
 
-    root->mutex.lock();
-    root->message = "hello shared memory";
-    root->mutex.unlock();
+    root->message.with_lock([](SharedMemoryString& message) {
+        message = "hello shared memory";
+    });
 }
 ```
 
@@ -470,18 +476,27 @@ int main()
 ```cpp
 #include "interprocess/container/shared_memory_string.h"
 #include "interprocess/ipc/managed_shared_memory.h"
+#include "interprocess/sync/posix_mutex.h"
+#include "interprocess/sync/synchronized.h"
 
 using namespace interprocess;
+
+using SynchronizedString = Synchronized<SharedMemoryString, InterprocessMutex>;
+
+struct RootObject
+{
+    SynchronizedString message;
+};
 
 int main()
 {
     ManagedSharedMemory segment(open_only, "demo_segment");
     RootObject* root = segment.find<RootObject>("RootObject");
 
-    root->mutex.lock();
-    const char* text = root->message.c_str();
-    (void)text;
-    root->mutex.unlock();
+    root->message.with_lock([](const SharedMemoryString& message) {
+        const char* text = message.c_str();
+        (void)text;
+    });
 }
 ```
 

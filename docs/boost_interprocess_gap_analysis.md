@@ -208,8 +208,9 @@
    - `SharedMemoryHashSet` 可复用现有 hash table 基础设施。
    - `multimap` / `multiset` 视业务需求再做。
 
-9. **locked view / synchronized wrapper**
-   - 提供 `with_lock(mutex, fn)` 或 `locked_ref<T>`，降低用户忘记 unlock、异常路径未释放锁的风险。
+9. **locked view / synchronized wrapper（已落地）**
+   - 已提供 `with_lock(mutex, fn)`、`LockedRef<T, Mutex>` 和 `Synchronized<T, Mutex>`。
+   - 降低用户忘记 unlock、异常路径未释放锁的风险，并支持 vector 批量读这类低锁次数访问模式。
    - 这比给所有容器内建锁更符合当前“容器不内建业务锁”的设计。
 
 10. **文件映射后端 `managed_mapped_file`**

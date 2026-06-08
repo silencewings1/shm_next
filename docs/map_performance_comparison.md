@@ -26,6 +26,18 @@ key=int64_t
 record_bytes=64
 ```
 
+稳定性复测口径：
+
+```text
+rounds=5
+result=avg[min,max] ns/op
+```
+
+判定规则：
+
+- 如果更快一方的最大值仍低于另一方最小值，记为“稳定更快”。
+- 如果两边区间重叠但平均值方向一致，记为“平均更快但区间重叠”。
+
 参考 `shm` map 使用单值模式：
 
 ```text
@@ -123,8 +135,79 @@ cmake --build build -j 4 --target gtshm20
 | 多线程按 key 删除 | `erase`: 8.135 ms / 162.7 ns/op | `erase`: 98.488 ms / 1969.8 ns/op | `shm_next` 更快，约 12.1x |
 | 多进程按 key 删除 | `erase`: 11.710 ms / 234.2 ns/op | `erase`: 98.705 ms / 1974.1 ns/op | `shm_next` 更快，约 8.4x |
 
+## 本轮复测结果
+
+| 场景 | `shm_next` | `shm` | 对比结论 |
+| --- | ---: | ---: | --- |
+| 多线程新 key 插入 | `try_emplace`: 12.229 ms / 244.6 ns/op | `insert`: 99.997 ms / 1999.9 ns/op | `shm_next` 更快，约 8.2x |
+| 多进程新 key 插入 | `try_emplace`: 17.254 ms / 345.1 ns/op | `insert`: 106.128 ms / 2122.6 ns/op | `shm_next` 更快，约 6.2x |
+| 多线程零拷贝查找 | `find`: 10.112 ms / 202.2 ns/op | `find`: 5.715 ms / 114.3 ns/op | `shm` 更快，约 1.8x |
+| 多进程零拷贝查找 | `find`: 14.819 ms / 296.4 ns/op | `find`: 6.815 ms / 136.3 ns/op | `shm` 更快，约 2.2x |
+| 多线程拷贝读取 | `find + memcpy`: 14.334 ms / 286.7 ns/op | `fetch`: 7.407 ms / 148.1 ns/op | `shm` 更快，约 1.9x |
+| 多进程拷贝读取 | `find + memcpy`: 17.054 ms / 341.1 ns/op | `fetch`: 6.704 ms / 134.1 ns/op | `shm` 更快，约 2.5x |
+| 多线程已有 key 更新 | `find + assign`: 10.645 ms / 212.9 ns/op | `update`: 9.391 ms / 187.8 ns/op | `shm` 略快，约 1.1x |
+| 多进程已有 key 更新 | `find + assign`: 17.729 ms / 354.6 ns/op | `update`: 11.334 ms / 226.7 ns/op | `shm` 更快，约 1.6x |
+| 多线程按 key 删除 | `erase`: 8.528 ms / 170.6 ns/op | `erase`: 85.444 ms / 1708.9 ns/op | `shm_next` 更快，约 10.0x |
+| 多进程按 key 删除 | `erase`: 14.961 ms / 299.2 ns/op | `erase`: 93.085 ms / 1861.7 ns/op | `shm_next` 更快，约 6.2x |
+
+## 5 轮稳定性复测结果
+
+| 场景 | `shm_next` avg[min,max] | `shm` avg[min,max] | 稳定性判定 |
+| --- | ---: | ---: | --- |
+| 多线程新 key 插入 | `try_emplace`: 339.8 [298.6,359.2] ns/op | `insert`: 2215.5 [2126.7,2378.6] ns/op | `shm_next` 稳定更快 |
+| 多进程新 key 插入 | `try_emplace`: 387.8 [333.7,420.7] ns/op | `insert`: 2135.6 [2078.1,2168.6] ns/op | `shm_next` 稳定更快 |
+| 多线程单条零拷贝查找 | `find`: 261.4 [239.9,302.3] ns/op | `find`: 135.9 [120.9,157.4] ns/op | `shm` 稳定更快 |
+| 多进程单条零拷贝查找 | `find`: 321.4 [238.1,372.3] ns/op | `find`: 135.0 [125.7,143.2] ns/op | `shm` 稳定更快 |
+| 多线程批量零拷贝查找 | `find`: 100.9 [89.8,110.0] ns/op | `find`: 135.9 [120.9,157.4] ns/op | `shm_next` 稳定更快 |
+| 多进程批量零拷贝查找 | `find`: 130.6 [99.0,157.6] ns/op | `find`: 135.0 [125.7,143.2] ns/op | `shm_next` 平均更快但区间重叠 |
+| 多线程单条拷贝读取 | `find + memcpy`: 234.6 [198.1,315.0] ns/op | `fetch`: 164.0 [161.1,168.4] ns/op | `shm` 稳定更快 |
+| 多进程单条拷贝读取 | `find + memcpy`: 350.6 [325.1,393.3] ns/op | `fetch`: 164.8 [148.1,178.6] ns/op | `shm` 稳定更快 |
+| 多线程批量拷贝读取 | `find + memcpy`: 104.3 [90.7,130.6] ns/op | `fetch`: 164.0 [161.1,168.4] ns/op | `shm_next` 稳定更快 |
+| 多进程批量拷贝读取 | `find + memcpy`: 135.9 [108.0,172.8] ns/op | `fetch`: 164.8 [148.1,178.6] ns/op | `shm_next` 平均更快但区间重叠 |
+| 多线程单条已有 key 更新 | `find + assign`: 253.3 [205.4,290.5] ns/op | `update`: 194.5 [189.7,197.6] ns/op | `shm` 稳定更快 |
+| 多进程单条已有 key 更新 | `find + assign`: 387.5 [326.3,455.8] ns/op | `update`: 254.4 [223.5,297.8] ns/op | `shm` 稳定更快 |
+| 多线程批量已有 key 更新 | `find + assign`: 109.3 [94.8,120.0] ns/op | `update`: 194.5 [189.7,197.6] ns/op | `shm_next` 稳定更快 |
+| 多进程批量已有 key 更新 | `find + assign`: 150.9 [122.7,193.9] ns/op | `update`: 254.4 [223.5,297.8] ns/op | `shm_next` 稳定更快 |
+| 多线程按 key 删除 | `erase`: 206.1 [188.4,251.8] ns/op | `erase`: 1908.1 [1865.7,1943.9] ns/op | `shm_next` 稳定更快 |
+| 多进程按 key 删除 | `erase`: 298.6 [279.0,327.9] ns/op | `erase`: 1925.9 [1893.0,1984.9] ns/op | `shm_next` 稳定更快 |
+
+## 优化项与推荐用法
+
+`SharedMemoryMap` 是有序红黑树容器。原始单条外部锁测试中，`find`、`find + memcpy`、`find + assign` 低于 `shm map`，主要原因包括：
+
+- 每条操作都单独进入外部 `InterprocessMutex`。
+- 红黑树查找需要多次节点跳转和 key 比较。
+- `shm map` 是偏固定 key-value 存储的共享内存对象，读接口内部有 reader lock。
+
+已落地的优化技术：
+
+| 优化技术 | 作用 | 适用接口 |
+| --- | --- | --- |
+| `Synchronized<SharedMemoryMap<K,V>, InterprocessMutex>::with_lock()` | 单次进入临界区后连续执行多次有序 map 操作 | `find()`、`find + memcpy`、`find + assign` |
+| 批量访问 | 降低每条 map 操作的外部锁成本 | 连续查找、批量读取、批量更新 |
+| 节点缓存 | 复用 erase 后的 map 节点，降低重新插入的分配成本 | 插入 / 删除混合场景 |
+| 保留有序语义 | 继续支持有序遍历、`lower_bound`、`upper_bound` | 需要范围查询的业务 |
+
+如果业务只需要单 key 高频读写，不依赖顺序，应优先使用 `SharedMemoryHashMap`。该容器的独立结果见 [HashMap 性能对比](hash_map_performance_comparison.md)。
+
+## 优化后汇总结果
+
+| 场景 | 推荐 `shm_next` 用法 | `shm_next` | `shm` | 结论 |
+| --- | --- | ---: | ---: | --- |
+| 多线程新 key 插入 | 单条外部锁 `try_emplace` | 339.8 [298.6,359.2] ns/op | `insert`: 2215.5 [2126.7,2378.6] ns/op | `shm_next` 稳定更快 |
+| 多进程新 key 插入 | 单条外部锁 `try_emplace` | 387.8 [333.7,420.7] ns/op | `insert`: 2135.6 [2078.1,2168.6] ns/op | `shm_next` 稳定更快 |
+| 多线程零拷贝查找 | `Synchronized<Map>::with_lock()` 批量 `find` | 100.9 [89.8,110.0] ns/op | `find`: 135.9 [120.9,157.4] ns/op | `shm_next` 稳定更快 |
+| 多进程零拷贝查找 | `Synchronized<Map>::with_lock()` 批量 `find` | 130.6 [99.0,157.6] ns/op | `find`: 135.0 [125.7,143.2] ns/op | `shm_next` 平均更快但区间重叠 |
+| 多线程拷贝读取 | `Synchronized<Map>::with_lock()` 批量 `find + memcpy` | 104.3 [90.7,130.6] ns/op | `fetch`: 164.0 [161.1,168.4] ns/op | `shm_next` 稳定更快 |
+| 多进程拷贝读取 | `Synchronized<Map>::with_lock()` 批量 `find + memcpy` | 135.9 [108.0,172.8] ns/op | `fetch`: 164.8 [148.1,178.6] ns/op | `shm_next` 平均更快但区间重叠 |
+| 多线程已有 key 更新 | `Synchronized<Map>::with_lock()` 批量 `find + assign` | 109.3 [94.8,120.0] ns/op | `update`: 194.5 [189.7,197.6] ns/op | `shm_next` 稳定更快 |
+| 多进程已有 key 更新 | `Synchronized<Map>::with_lock()` 批量 `find + assign` | 150.9 [122.7,193.9] ns/op | `update`: 254.4 [223.5,297.8] ns/op | `shm_next` 稳定更快 |
+| 多线程按 key 删除 | 单条外部锁 `erase` | 206.1 [188.4,251.8] ns/op | `erase`: 1908.1 [1865.7,1943.9] ns/op | `shm_next` 稳定更快 |
+| 多进程按 key 删除 | 单条外部锁 `erase` | 298.6 [279.0,327.9] ns/op | `erase`: 1925.9 [1893.0,1984.9] ns/op | `shm_next` 稳定更快 |
+
 ## 结论
 
 - `shm_next` 在插入和删除上优势明显，尤其删除场景差距最大。
-- `shm` 在查找、拷贝读取和已有 key 更新上更快。一个重要原因是 `shm` 的 map 是面向固定 key/value 存储设计的共享内存对象，并且读接口使用 reader lock；`shm_next` 当前测试为了保持线程/进程安全，读操作也用外部互斥锁串行保护。
-- 当前比较是“容器可安全并发使用时的端到端接口成本”，不是单纯数据结构裸操作成本。后续如果要进一步定位差异，应增加单线程无锁版本，以及为 `shm_next` 增加进程共享读写锁后再复测读场景。
+- 原始单条外部锁测试中，`shm` 在查找、拷贝读取和已有 key 更新上更快。
+- 对连续有序 map 操作，使用 `Synchronized<Map>::with_lock()` 批量访问后，`shm_next` 的查找、拷贝读取和更新整体反超 `shm map`；其中多进程批量查找和多进程批量拷贝读取是平均更快但区间重叠，应按“有优势但存在波动”理解。
+- 需要有序遍历或范围查询时继续使用 `SharedMemoryMap`；只需要单 key 高频读写时优先使用 `SharedMemoryHashMap`。
