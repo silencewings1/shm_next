@@ -2,6 +2,7 @@
 
 #include "../allocator/offset_ptr.h"
 #include "../allocator/shared_memory_allocator.h"
+#include "detail/shared_memory_node_pool.h"
 #include <algorithm>
 #include <cstddef>
 #include <functional>
@@ -43,6 +44,7 @@ private:
     using rebind_alloc_t = typename Allocator::template rebind<U>::other;
 
     using node_allocator_type = rebind_alloc_t<Node>;
+    using node_pool_type = detail::SharedMemoryNodePool<Node, node_allocator_type>;
 
     template <typename ValueType, typename PointerType, typename ReferenceType>
     class BasicIterator
@@ -141,12 +143,12 @@ public:
     using const_reverse_iterator = std::reverse_iterator<const_iterator>;
 
     explicit SharedMemoryList(const allocator_type& alloc) noexcept
-        : allocator(alloc), node_allocator(alloc.get_manager()), sentinel(), size_(0)
+        : allocator(alloc), node_pool(node_allocator_type(alloc.get_manager())), sentinel(), size_(0)
     {
     }
 
     explicit SharedMemoryList(size_type count, const allocator_type& alloc)
-        : allocator(alloc), node_allocator(alloc.get_manager()), sentinel(), size_(0)
+        : allocator(alloc), node_pool(node_allocator_type(alloc.get_manager())), sentinel(), size_(0)
     {
         try
         {
@@ -158,12 +160,13 @@ public:
         catch (...)
         {
             clear();
+            shrink_to_fit();
             throw;
         }
     }
 
     SharedMemoryList(size_type count, const value_type& value, const allocator_type& alloc)
-        : allocator(alloc), node_allocator(alloc.get_manager()), sentinel(), size_(0)
+        : allocator(alloc), node_pool(node_allocator_type(alloc.get_manager())), sentinel(), size_(0)
     {
         try
         {
@@ -172,6 +175,7 @@ public:
         catch (...)
         {
             clear();
+            shrink_to_fit();
             throw;
         }
     }
@@ -179,7 +183,7 @@ public:
     template <typename InputIt,
               typename = std::enable_if_t<!std::is_integral<InputIt>::value, int>>
     SharedMemoryList(InputIt first, InputIt last, const allocator_type& alloc)
-        : allocator(alloc), node_allocator(alloc.get_manager()), sentinel(), size_(0)
+        : allocator(alloc), node_pool(node_allocator_type(alloc.get_manager())), sentinel(), size_(0)
     {
         try
         {
@@ -188,12 +192,13 @@ public:
         catch (...)
         {
             clear();
+            shrink_to_fit();
             throw;
         }
     }
 
     SharedMemoryList(std::initializer_list<value_type> init, const allocator_type& alloc)
-        : allocator(alloc), node_allocator(alloc.get_manager()), sentinel(), size_(0)
+        : allocator(alloc), node_pool(node_allocator_type(alloc.get_manager())), sentinel(), size_(0)
     {
         try
         {
@@ -202,12 +207,13 @@ public:
         catch (...)
         {
             clear();
+            shrink_to_fit();
             throw;
         }
     }
 
     SharedMemoryList(const SharedMemoryList& other)
-        : allocator(other.allocator), node_allocator(other.allocator.get_manager()), sentinel(),
+        : allocator(other.allocator), node_pool(node_allocator_type(other.allocator.get_manager())), sentinel(),
           size_(0)
     {
         try
@@ -217,12 +223,13 @@ public:
         catch (...)
         {
             clear();
+            shrink_to_fit();
             throw;
         }
     }
 
     SharedMemoryList(SharedMemoryList&& other) noexcept
-        : allocator(other.allocator), node_allocator(other.allocator.get_manager()), sentinel(),
+        : allocator(other.allocator), node_pool(std::move(other.node_pool)), sentinel(),
           size_(0)
     {
         adopt_nodes_from(other);
@@ -231,6 +238,7 @@ public:
     ~SharedMemoryList()
     {
         clear();
+        shrink_to_fit();
     }
 
     SharedMemoryList& operator=(const SharedMemoryList& other)
@@ -253,8 +261,9 @@ public:
         }
 
         clear();
+        shrink_to_fit();
         allocator = other.allocator;
-        node_allocator = node_allocator_type(other.allocator.get_manager());
+        node_pool = std::move(other.node_pool);
         adopt_nodes_from(other);
         return *this;
     }
@@ -372,6 +381,26 @@ public:
         size_ = 0;
     }
 
+    size_type cached_node_count() const noexcept
+    {
+        return node_pool.cached_node_count();
+    }
+
+    size_type node_pool_hits() const noexcept
+    {
+        return node_pool.node_pool_hits();
+    }
+
+    size_type node_pool_allocations() const noexcept
+    {
+        return node_pool.node_pool_allocations();
+    }
+
+    void shrink_to_fit() noexcept
+    {
+        node_pool.shrink_to_fit();
+    }
+
     void swap(SharedMemoryList& other) noexcept
     {
         if (this == &other)
@@ -384,7 +413,7 @@ public:
         const bool this_empty = empty();
         const bool other_empty = other.empty();
         swap(allocator, other.allocator);
-        swap(node_allocator, other.node_allocator);
+        swap(node_pool, other.node_pool);
 
         BaseNode* this_first = sentinel.next.get();
         BaseNode* this_last = sentinel.prev.get();
@@ -783,27 +812,12 @@ private:
     template <typename... Args>
     Node* create_node(Args&&... args)
     {
-        Node* storage = node_allocator.allocate(1);
-        try
-        {
-            node_allocator.construct(storage, std::forward<Args>(args)...);
-        }
-        catch (...)
-        {
-            node_allocator.deallocate(storage, 1);
-            throw;
-        }
-        return storage;
+        return node_pool.create(std::forward<Args>(args)...);
     }
 
     void destroy_node(Node* node) noexcept
     {
-        if (!node)
-        {
-            return;
-        }
-        node_allocator.destroy(node);
-        node_allocator.deallocate(node, 1);
+        node_pool.destroy(node);
     }
 
     static void link_between(BaseNode* prev, BaseNode* next, BaseNode* node) noexcept
@@ -941,7 +955,7 @@ private:
     }
 
     allocator_type allocator;
-    node_allocator_type node_allocator;
+    node_pool_type node_pool;
     BaseNode sentinel;
     size_type size_;
 };

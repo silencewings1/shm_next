@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../error.h"
 #include "../allocator/shared_memory_manager.h"
 #include "../allocator/shared_memory_allocator.h"
 #include "posix_mapped_region.h"
@@ -237,6 +238,21 @@ public:
         return manager->get_free_memory();
     }
 
+    SharedMemoryAllocatorStats get_allocator_stats() const
+    {
+        if (read_only_mode)
+        {
+            return manager->get_allocator_stats_read_only();
+        }
+        return manager->get_allocator_stats();
+    }
+
+    uint32_t get_layout_version() const noexcept
+    {
+        return manager != nullptr ? manager->get_layout_version()
+                                  : SharedMemoryManager::current_layout_version();
+    }
+
     static bool remove(const char* name)
     {
         return SharedMemoryObject::remove(name);
@@ -253,7 +269,8 @@ public:
         const std::size_t old_size = shared_memory.get_size();
         if (extra_bytes > std::numeric_limits<std::size_t>::max() - old_size)
         {
-            throw std::length_error("Shared memory segment grow size overflow");
+            throw_interprocess_error(InterprocessErrc::allocation_size_overflow,
+                                     "Shared memory segment grow size overflow");
         }
 
         const std::size_t new_size = align_file_size(old_size + extra_bytes);
@@ -361,7 +378,8 @@ private:
     {
         if (size > std::numeric_limits<std::size_t>::max() - (alignment - 1))
         {
-            throw std::length_error("Shared memory segment size overflow");
+            throw_interprocess_error(InterprocessErrc::allocation_size_overflow,
+                                     "Shared memory segment size overflow");
         }
         return (size + alignment - 1) & ~(alignment - 1);
     }
@@ -388,8 +406,10 @@ private:
     {
         if (read_only_mode)
         {
-            throw std::runtime_error(std::string(operation) +
-                                     " is not available on read-only shared memory mappings");
+            throw_interprocess_error(
+                InterprocessErrc::read_only_violation,
+                std::string(operation) +
+                    " is not available on read-only shared memory mappings");
         }
     }
 
@@ -431,9 +451,10 @@ private:
                         SharedMemoryManager::get_initialization_state(region.get_address());
                     if (!SharedMemoryManager::is_known_initialization_state(state))
                     {
-                        throw std::runtime_error(
+                        throw_interprocess_error(
+                            InterprocessErrc::unknown_initialization_state,
                             std::string("unknown shared memory initialization state: ") +
-                            std::to_string(static_cast<uint32_t>(state)));
+                                std::to_string(static_cast<uint32_t>(state)));
                     }
 
                     if (state == SharedMemoryManager::InitializationState::initialized)
@@ -452,22 +473,28 @@ private:
 
                     if (state == SharedMemoryManager::InitializationState::corrupted)
                     {
-                        throw std::runtime_error("shared memory segment is marked corrupted");
+                        throw_interprocess_error(InterprocessErrc::initialization_corrupted,
+                                                 "shared memory segment is marked corrupted");
                     }
 
                     last_error = std::string("shared memory manager is ") +
                                  SharedMemoryManager::initialization_state_name(state);
                 }
-                catch (const std::runtime_error& e)
+                catch (const InterprocessError& e)
                 {
                     last_error = e.what();
-                    if (last_error.find("corrupted") != std::string::npos ||
-                        last_error.find("unknown shared memory initialization state") !=
-                            std::string::npos ||
-                        last_error.find("magic mismatch") != std::string::npos)
+                    if (e.errc() == InterprocessErrc::initialization_corrupted ||
+                        e.errc() == InterprocessErrc::unknown_initialization_state ||
+                        e.errc() == InterprocessErrc::magic_mismatch ||
+                        e.errc() == InterprocessErrc::unsupported_layout_version ||
+                        e.errc() == InterprocessErrc::layout_header_mismatch)
                     {
                         throw;
                     }
+                }
+                catch (const std::runtime_error& e)
+                {
+                    last_error = e.what();
                 }
             }
             else
@@ -482,7 +509,8 @@ private:
         {
             last_error = "shared memory object is still empty";
         }
-        throw std::runtime_error("Failed to attach shared memory manager: " + last_error);
+        throw_interprocess_error(InterprocessErrc::initialization_in_progress,
+                                 "Failed to attach shared memory manager: " + last_error);
     }
 
     SharedMemoryObject shm;

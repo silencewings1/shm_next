@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../diagnostics.h"
+#include "../error.h"
 #include "../sync/posix_mutex.h"
 #include "detail/named_object_registry.h"
 #include "detail/shared_memory_block_allocator.h"
@@ -26,7 +28,10 @@ namespace interprocess
 class alignas(16) SharedMemoryManager
 {
 public:
-    static constexpr uint32_t MAGIC = 0x534D4D33; // "SMM3"
+    static constexpr uint32_t MAGIC = 0x534D4D34; // "SMM4"
+    static constexpr uint32_t CURRENT_LAYOUT_VERSION = 2;
+    static constexpr uint32_t MIN_SUPPORTED_LAYOUT_VERSION = 1;
+    static constexpr uint32_t MAX_SUPPORTED_LAYOUT_VERSION = CURRENT_LAYOUT_VERSION;
 
     enum class InitializationState : uint32_t
     {
@@ -38,7 +43,7 @@ public:
 
     static std::size_t minimum_initialization_size() noexcept
     {
-        return sizeof(uint32_t);
+        return 4 * sizeof(uint32_t);
     }
 
     static InitializationState get_initialization_state(const void* base_addr) noexcept
@@ -82,11 +87,22 @@ public:
                          static_cast<uint32_t>(InitializationState::corrupted));
     }
 
+    static uint32_t current_layout_version() noexcept
+    {
+        return CURRENT_LAYOUT_VERSION;
+    }
+
+    static bool is_supported_layout_version(uint32_t version) noexcept
+    {
+        return version >= MIN_SUPPORTED_LAYOUT_VERSION && version <= MAX_SUPPORTED_LAYOUT_VERSION;
+    }
+
     static SharedMemoryManager* create(void* base_addr, std::size_t total_size)
     {
         if (total_size < sizeof(SharedMemoryManager) + sizeof(detail::BlockHeader))
         {
-            throw std::runtime_error("Shared memory size is too small to initialize manager.");
+            throw_interprocess_error(InterprocessErrc::segment_too_small,
+                                     "Shared memory size is too small to initialize manager.");
         }
 
         auto* state_word = static_cast<uint32_t*>(base_addr);
@@ -95,9 +111,13 @@ public:
                                          static_cast<uint32_t>(InitializationState::initializing)))
         {
             InitializationState state = static_cast<InitializationState>(expected);
-            throw std::runtime_error(
-                std::string("Shared memory segment is not ready to initialize: ") +
-                initialization_state_name(state));
+            const InterprocessErrc errc =
+                state == InitializationState::corrupted
+                    ? InterprocessErrc::initialization_corrupted
+                    : InterprocessErrc::initialization_in_progress;
+            throw_interprocess_error(
+                errc, std::string("Shared memory segment is not ready to initialize: ") +
+                          initialization_state_name(state));
         }
 
         try
@@ -117,13 +137,33 @@ public:
         InitializationState state = get_initialization_state(base_addr);
         if (state != InitializationState::initialized)
         {
-            throw std::runtime_error(std::string("Shared memory manager is not initialized: ") +
-                                     initialization_state_name(state));
+            const InterprocessErrc errc =
+                state == InitializationState::corrupted
+                    ? InterprocessErrc::initialization_corrupted
+                    : InterprocessErrc::initialization_in_progress;
+            throw_interprocess_error(errc,
+                                     std::string("Shared memory manager is not initialized: ") +
+                                         initialization_state_name(state));
         }
         if (manager->magic != MAGIC)
         {
-            throw std::runtime_error(
+            throw_interprocess_error(
+                InterprocessErrc::magic_mismatch,
                 "Shared memory manager magic mismatch! Segment might not be initialized.");
+        }
+        if (!is_supported_layout_version(manager->layout_version))
+        {
+            throw_interprocess_error(
+                InterprocessErrc::unsupported_layout_version,
+                "Unsupported shared memory layout version: " +
+                    std::to_string(manager->layout_version));
+        }
+        if (manager->header_size != sizeof(SharedMemoryManager))
+        {
+            throw_interprocess_error(
+                InterprocessErrc::layout_header_mismatch,
+                "Shared memory manager header size mismatch: " +
+                    std::to_string(manager->header_size));
         }
         return manager;
     }
@@ -147,7 +187,8 @@ public:
     {
         if (out == nullptr && count != 0)
         {
-            throw std::invalid_argument("allocate_many output array must not be null");
+            throw_interprocess_error(InterprocessErrc::invalid_pointer,
+                                     "allocate_many output array must not be null");
         }
         with_manager_write_lock(
             [&] { block_allocator.allocate_many(size, count, alignment, out); });
@@ -157,7 +198,8 @@ public:
     {
         if (ptrs == nullptr && count != 0)
         {
-            throw std::invalid_argument("deallocate_many pointer array must not be null");
+            throw_interprocess_error(InterprocessErrc::invalid_pointer,
+                                     "deallocate_many pointer array must not be null");
         }
         with_manager_write_lock([&] { block_allocator.deallocate_many(ptrs, count); });
     }
@@ -430,7 +472,9 @@ public:
 
         if (!is_metadata_generation_stable(generation))
         {
-            throw std::runtime_error("Shared memory metadata changed during read-only iteration");
+            throw_interprocess_error(
+                InterprocessErrc::metadata_changed_during_read,
+                "Shared memory metadata changed during read-only iteration");
         }
         if (callback_error)
         {
@@ -465,9 +509,29 @@ public:
         return with_manager_lock([&] { return block_allocator.get_free_memory(); });
     }
 
+    SharedMemoryAllocatorStats get_stats() const
+    {
+        return with_manager_lock([&] { return block_allocator.get_stats(); });
+    }
+
+    SharedMemoryAllocatorStats get_allocator_stats() const
+    {
+        return with_manager_lock([&] { return block_allocator.get_stats(); });
+    }
+
     std::size_t get_size() const noexcept
     {
         return total_size;
+    }
+
+    uint32_t get_layout_version() const noexcept
+    {
+        return layout_version;
+    }
+
+    uint32_t get_header_size() const noexcept
+    {
+        return header_size;
     }
 
     bool owns(const void* ptr) const
@@ -577,12 +641,23 @@ public:
         return with_read_only_snapshot([&] { return block_allocator.get_free_memory(); });
     }
 
+    SharedMemoryAllocatorStats get_stats_read_only() const
+    {
+        return with_read_only_snapshot([&] { return block_allocator.get_stats(); });
+    }
+
+    SharedMemoryAllocatorStats get_allocator_stats_read_only() const
+    {
+        return with_read_only_snapshot([&] { return block_allocator.get_stats(); });
+    }
+
     void validate_read_only_access() const
     {
         with_read_only_snapshot([&] {
             if (!check_sanity_unlocked())
             {
-                throw std::runtime_error("Shared memory manager read-only sanity check failed");
+                throw_interprocess_error(InterprocessErrc::metadata_changed_during_read,
+                                         "Shared memory manager read-only sanity check failed");
             }
         });
     }
@@ -599,7 +674,8 @@ private:
     {
         if (name == nullptr || name[0] == '\0')
         {
-            throw std::invalid_argument("Named shared memory object name must not be empty");
+            throw_interprocess_error(InterprocessErrc::invalid_name,
+                                     "Named shared memory object name must not be empty");
         }
         return std::strlen(name);
     }
@@ -629,12 +705,14 @@ private:
     {
         if (count == 0)
         {
-            throw std::invalid_argument("Named object array count must be greater than zero");
+            throw_interprocess_error(InterprocessErrc::invalid_name,
+                                     "Named object array count must be greater than zero");
         }
 
         if (count > std::numeric_limits<std::size_t>::max() / sizeof(T))
         {
-            throw std::length_error("Named object allocation size overflow");
+            throw_interprocess_error(InterprocessErrc::allocation_size_overflow,
+                                     "Named object allocation size overflow");
         }
 
         return count * sizeof(T);
@@ -667,7 +745,8 @@ private:
     {
         if (header.object_size != sizeof(T) || header.type_hash != named_type_hash<T>())
         {
-            throw std::runtime_error("Named shared memory object type mismatch");
+            throw_interprocess_error(InterprocessErrc::named_object_type_mismatch,
+                                     "Named shared memory object type mismatch");
         }
     }
 
@@ -884,7 +963,8 @@ private:
             std::this_thread::yield();
         }
 
-        throw std::runtime_error("Shared memory metadata writer is active");
+        throw_interprocess_error(InterprocessErrc::metadata_changed_during_read,
+                                 "Shared memory metadata writer is active");
     }
 
     class MetadataWriteGuard
@@ -918,7 +998,8 @@ private:
     bool check_sanity_unlocked() const noexcept
     {
         return get_initialization_state(this) == InitializationState::initialized &&
-               magic == MAGIC && block_allocator.check_sanity();
+               magic == MAGIC && is_supported_layout_version(layout_version) &&
+               header_size == sizeof(SharedMemoryManager) && block_allocator.check_sanity();
     }
 
     void lock_for_manager_recovery() const
@@ -932,7 +1013,8 @@ private:
         if (!check_sanity_unlocked())
         {
             mutex.unlock();
-            throw std::runtime_error(
+            throw_interprocess_error(
+                InterprocessErrc::initialization_corrupted,
                 "Shared memory manager mutex owner died and sanity check failed");
         }
 
@@ -1048,12 +1130,15 @@ private:
             }
         }
 
-        throw std::runtime_error("Shared memory metadata changed during read-only access");
+        throw_interprocess_error(InterprocessErrc::metadata_changed_during_read,
+                                 "Shared memory metadata changed during read-only access");
     }
 
 private:
     uint32_t initialization_state;
     uint32_t magic;
+    uint32_t layout_version;
+    uint32_t header_size;
     mutable InterprocessMutex mutex;
     mutable uint64_t metadata_generation;
     std::size_t total_size;
@@ -1062,6 +1147,8 @@ private:
 
     explicit SharedMemoryManager(std::size_t total_size)
         : initialization_state(static_cast<uint32_t>(InitializationState::initializing)), magic(0),
+          layout_version(CURRENT_LAYOUT_VERSION),
+          header_size(static_cast<uint32_t>(sizeof(SharedMemoryManager))),
           metadata_generation(0), total_size(total_size), block_allocator(), named_objects()
     {
         named_objects.initialize();

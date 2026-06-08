@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../../diagnostics.h"
+#include "../../error.h"
 #include "../offset_ptr.h"
 #include <cstddef>
 #include <cstdint>
@@ -39,7 +41,10 @@ class SharedMemoryBlockAllocator
 
 public:
     SharedMemoryBlockAllocator() noexcept
-        : segment_base(nullptr), segment_size(0), first_block(nullptr), free_list_head(nullptr)
+        : segment_base(nullptr), segment_size(0), first_block(nullptr), free_list_head(nullptr), total_allocate_calls_(0),
+          total_deallocate_calls_(0), total_allocate_many_calls_(0), total_deallocate_many_calls_(0),
+          total_failed_allocations_(0), total_split_count_(0), total_merge_count_(0),
+          total_try_expand_calls_(0), total_try_expand_successes_(0), total_try_expand_failures_(0)
     {
     }
 
@@ -48,7 +53,8 @@ public:
         const std::size_t header_size = align_up(manager_header_size);
         if (total_size < header_size + sizeof(BlockHeader))
         {
-            throw std::runtime_error("Shared memory block allocator segment is too small.");
+            throw_interprocess_error(InterprocessErrc::segment_too_small,
+                                     "Shared memory block allocator segment is too small.");
         }
 
         BlockHeader* first_block =
@@ -62,10 +68,21 @@ public:
         this->segment_size = total_size;
         this->first_block = first_block;
         free_list_head = first_block;
+        total_allocate_calls_ = 0;
+        total_deallocate_calls_ = 0;
+        total_allocate_many_calls_ = 0;
+        total_deallocate_many_calls_ = 0;
+        total_failed_allocations_ = 0;
+        total_split_count_ = 0;
+        total_merge_count_ = 0;
+        total_try_expand_calls_ = 0;
+        total_try_expand_successes_ = 0;
+        total_try_expand_failures_ = 0;
     }
 
     void* allocate(std::size_t size, std::size_t requested_alignment = alignment)
     {
+        ++total_allocate_calls_;
         if (size == 0)
         {
             return nullptr;
@@ -88,12 +105,15 @@ public:
             curr = curr->next_free.get();
         }
 
-        throw std::bad_alloc();
+        ++total_failed_allocations_;
+        throw_interprocess_error(InterprocessErrc::bad_alloc,
+                                 "Shared memory block allocator is out of memory");
     }
 
     void allocate_many(std::size_t size, std::size_t count, std::size_t requested_alignment,
                        void** out)
     {
+        ++total_allocate_many_calls_;
         std::size_t allocated = 0;
         try
         {
@@ -116,6 +136,7 @@ public:
 
     void deallocate_many(void* const* ptrs, std::size_t count)
     {
+        ++total_deallocate_many_calls_;
         for (std::size_t i = 0; i < count; ++i)
         {
             deallocate(ptrs[i]);
@@ -124,8 +145,10 @@ public:
 
     bool try_expand(void* ptr, std::size_t new_size, std::size_t requested_alignment = alignment)
     {
+        ++total_try_expand_calls_;
         if (ptr == nullptr || new_size == 0 || !has_allocation_header(ptr))
         {
+            ++total_try_expand_failures_;
             return false;
         }
 
@@ -134,6 +157,7 @@ public:
         BlockHeader* block = allocation_header->block.get();
         if (!is_valid_payload(ptr, block) || block->is_free)
         {
+            ++total_try_expand_failures_;
             return false;
         }
 
@@ -141,24 +165,28 @@ public:
         AllocationLayout expanded_layout = make_layout(block, new_size, payload_alignment);
         if (expanded_layout.payload != ptr)
         {
+            ++total_try_expand_failures_;
             return false;
         }
 
         if (expanded_layout.total_size <= block->size)
         {
             allocation_header->requested_size = new_size;
+            ++total_try_expand_successes_;
             return true;
         }
 
         BlockHeader* next = physical_next(block);
         if (next == nullptr || !next->is_free)
         {
+            ++total_try_expand_failures_;
             return false;
         }
 
         const std::size_t combined_size = block->size + next->size;
         if (combined_size < expanded_layout.total_size)
         {
+            ++total_try_expand_failures_;
             return false;
         }
 
@@ -166,6 +194,7 @@ public:
         block->size = combined_size;
         split_allocated_block(block, expanded_layout.total_size);
         allocation_header->requested_size = new_size;
+        ++total_try_expand_successes_;
         return true;
     }
 
@@ -239,6 +268,7 @@ public:
 
     void deallocate(void* ptr)
     {
+        ++total_deallocate_calls_;
         if (!ptr)
         {
             return;
@@ -246,7 +276,8 @@ public:
 
         if (!has_allocation_header(ptr))
         {
-            throw std::runtime_error("Invalid shared memory deallocation pointer");
+            throw_interprocess_error(InterprocessErrc::invalid_pointer,
+                                     "Invalid shared memory deallocation pointer");
         }
 
         AllocationHeader* allocation_header =
@@ -255,12 +286,13 @@ public:
 
         if (!is_valid_payload(ptr, block))
         {
-            throw std::runtime_error("Invalid shared memory deallocation pointer");
+            throw_interprocess_error(InterprocessErrc::invalid_pointer,
+                                     "Invalid shared memory deallocation pointer");
         }
 
         if (block->is_free)
         {
-            throw std::runtime_error("Double free detected");
+            throw_interprocess_error(InterprocessErrc::double_free, "Double free detected");
         }
 
         deallocate_block(block);
@@ -278,6 +310,78 @@ public:
         return free_mem;
     }
 
+    SharedMemoryAllocatorStats get_stats() const noexcept
+    {
+        SharedMemoryAllocatorStats stats;
+        stats.segment_size = segment_size;
+        if (segment_base.get() == nullptr || segment_size == 0 || first_block.get() == nullptr)
+        {
+            stats.sane = false;
+            return stats;
+        }
+
+        const uintptr_t segment_end = segment_end_address();
+        uintptr_t current = reinterpret_cast<uintptr_t>(first_block.get());
+        stats.managed_bytes = segment_end > current ? segment_end - current : 0;
+
+        std::size_t visited_blocks = 0;
+        const std::size_t max_blocks = segment_size / alignment + 1;
+        bool physical_sane = true;
+        while (current < segment_end && visited_blocks < max_blocks)
+        {
+            const BlockHeader* block = reinterpret_cast<const BlockHeader*>(current);
+            if (!is_aligned_address(current) || block->size < sizeof(BlockHeader) ||
+                block->size % alignment != 0 || current + block->size > segment_end)
+            {
+                physical_sane = false;
+                break;
+            }
+
+            ++stats.block_count;
+            if (block->is_free)
+            {
+                ++stats.free_block_count;
+                stats.free_block_bytes += block->size;
+                const std::size_t payload = block->size - sizeof(BlockHeader);
+                stats.free_payload_bytes += payload;
+                if (block->size > stats.largest_free_block)
+                {
+                    stats.largest_free_block = block->size;
+                }
+                if (payload > stats.largest_free_payload)
+                {
+                    stats.largest_free_payload = payload;
+                }
+            }
+            else
+            {
+                ++stats.allocated_block_count;
+                stats.allocated_block_bytes += block->size;
+            }
+
+            current += block->size;
+            ++visited_blocks;
+        }
+
+        if (visited_blocks >= max_blocks || current != segment_end)
+        {
+            physical_sane = false;
+        }
+
+        const BlockHeader* free_curr = free_list_head.get();
+        std::size_t free_seen = 0;
+        while (free_curr != nullptr && free_seen < max_blocks)
+        {
+            ++stats.free_list_count;
+            free_curr = free_curr->next_free.get();
+            ++free_seen;
+        }
+
+        stats.sane = physical_sane && free_seen < max_blocks && check_sanity();
+        populate_cumulative_stats(stats);
+        return stats;
+    }
+
     bool owns(const void* ptr) const noexcept
     {
         return ptr != nullptr && is_address_in_segment(reinterpret_cast<uintptr_t>(ptr));
@@ -292,7 +396,8 @@ public:
 
         if (!has_allocation_header(ptr))
         {
-            throw std::runtime_error("Invalid shared memory allocation pointer");
+            throw_interprocess_error(InterprocessErrc::invalid_pointer,
+                                     "Invalid shared memory allocation pointer");
         }
 
         AllocationHeader* allocation_header = reinterpret_cast<AllocationHeader*>(
@@ -300,7 +405,8 @@ public:
         BlockHeader* block = allocation_header->block.get();
         if (!is_valid_payload(ptr, block) || block->is_free)
         {
-            throw std::runtime_error("Invalid shared memory allocation pointer");
+            throw_interprocess_error(InterprocessErrc::invalid_pointer,
+                                     "Invalid shared memory allocation pointer");
         }
 
         return allocation_header->requested_size;
@@ -499,6 +605,7 @@ private:
         {
             return;
         }
+        ++total_split_count_;
 
         BlockHeader* new_block =
             reinterpret_cast<BlockHeader*>(reinterpret_cast<char*>(block) + used_size);
@@ -520,6 +627,7 @@ private:
         {
             remove_free_block(next);
             block->size += next->size;
+            ++total_merge_count_;
         }
 
         BlockHeader* prev = physical_previous(block);
@@ -528,6 +636,7 @@ private:
             remove_free_block(prev);
             prev->size += block->size;
             block = prev;
+            ++total_merge_count_;
         }
 
         block->is_free = true;
@@ -767,10 +876,34 @@ private:
                allocation_header->requested_size <= block_end - payload_address;
     }
 
+    void populate_cumulative_stats(SharedMemoryAllocatorStats& stats) const noexcept
+    {
+        stats.total_allocate_calls = total_allocate_calls_;
+        stats.total_deallocate_calls = total_deallocate_calls_;
+        stats.total_allocate_many_calls = total_allocate_many_calls_;
+        stats.total_deallocate_many_calls = total_deallocate_many_calls_;
+        stats.total_failed_allocations = total_failed_allocations_;
+        stats.total_split_count = total_split_count_;
+        stats.total_merge_count = total_merge_count_;
+        stats.total_try_expand_calls = total_try_expand_calls_;
+        stats.total_try_expand_successes = total_try_expand_successes_;
+        stats.total_try_expand_failures = total_try_expand_failures_;
+    }
+
     OffsetPtr<void> segment_base;
     std::size_t segment_size;
     OffsetPtr<BlockHeader> first_block;
     OffsetPtr<BlockHeader> free_list_head;
+    std::size_t total_allocate_calls_;
+    std::size_t total_deallocate_calls_;
+    std::size_t total_allocate_many_calls_;
+    std::size_t total_deallocate_many_calls_;
+    std::size_t total_failed_allocations_;
+    std::size_t total_split_count_;
+    std::size_t total_merge_count_;
+    std::size_t total_try_expand_calls_;
+    std::size_t total_try_expand_successes_;
+    std::size_t total_try_expand_failures_;
 };
 
 } // namespace interprocess::detail

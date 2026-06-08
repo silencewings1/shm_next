@@ -69,6 +69,41 @@ int main()
             return 1;
         }
 
+        IntList* pooled = segment.construct<IntList>("Pooled", segment.get_allocator<int>());
+        if (!require(pooled != nullptr, "failed to construct pooled list"))
+        {
+            return 1;
+        }
+        pooled->push_back(1);
+        pooled->push_back(2);
+        const std::size_t list_allocations_after_insert = pooled->node_pool_allocations();
+        pooled->erase(pooled->begin());
+        if (!require(pooled->cached_node_count() == 1,
+                     "list erase should cache one node for reuse"))
+        {
+            return 1;
+        }
+        pooled->push_back(3);
+        if (!require(pooled->node_pool_hits() == 1 &&
+                         pooled->node_pool_allocations() == list_allocations_after_insert &&
+                         pooled->cached_node_count() == 0,
+                     "list insert should reuse cached node without a new allocation"))
+        {
+            return 1;
+        }
+        pooled->pop_front();
+        if (!require(pooled->cached_node_count() == 1,
+                     "list pop should cache reusable node"))
+        {
+            return 1;
+        }
+        pooled->shrink_to_fit();
+        if (!require(pooled->cached_node_count() == 0,
+                     "list shrink_to_fit should release cached nodes"))
+        {
+            return 1;
+        }
+
         list->assign({5, 1, 3, 3, 2, 4});
         list->sort();
         if (!require_list_equals(*list, std::array<int, 6>{1, 2, 3, 3, 4, 5},
@@ -147,6 +182,7 @@ int main()
         if (reader == 0) _exit(child_read(shm_name.c_str()));
         if (!wait_ok(reader)) return 1;
         segment.destroy<LockedListRoot>("LockedRoot");
+        segment.destroy<IntList>("Pooled");
         segment.destroy<IntList>("Source");
         segment.destroy<IntList>("Other");
         segment.destroy<IntList>("List");

@@ -2,6 +2,7 @@
 
 #include "../../allocator/offset_ptr.h"
 #include "../../allocator/shared_memory_allocator.h"
+#include "shared_memory_node_pool.h"
 #include <cstddef>
 #include <functional>
 #include <iterator>
@@ -36,15 +37,11 @@ private:
         }
     };
 
-    struct FreeNode
-    {
-        OffsetPtr<FreeNode> next;
-    };
-
     template <typename U>
     using rebind_alloc_t = typename Allocator::template rebind<U>::other;
 
     using node_allocator_type = rebind_alloc_t<Node>;
+    using node_pool_type = SharedMemoryNodePool<Node, node_allocator_type>;
 
     template <typename ValueType, typename PointerType, typename ReferenceType>
     class BasicIterator
@@ -151,40 +148,30 @@ public:
     using const_iterator = BasicIterator<const value_type, const value_type*, const value_type&>;
 
     explicit SharedMemoryRbTreeMap(const allocator_type& alloc) noexcept
-        : allocator(alloc), node_allocator(alloc.get_manager()), compare(), root(nullptr),
-          free_nodes(nullptr), size_(0), cached_node_count_(0), node_pool_hits_(0),
-          node_pool_allocations_(0)
+        : allocator(alloc), node_allocator(alloc.get_manager()), node_pool(node_allocator), compare(), root(nullptr),
+          size_(0)
     {
     }
 
     SharedMemoryRbTreeMap(const key_compare& comp, const allocator_type& alloc) noexcept
-        : allocator(alloc), node_allocator(alloc.get_manager()), compare(comp), root(nullptr),
-          free_nodes(nullptr), size_(0), cached_node_count_(0), node_pool_hits_(0),
-          node_pool_allocations_(0)
+        : allocator(alloc), node_allocator(alloc.get_manager()), node_pool(node_allocator), compare(comp), root(nullptr),
+          size_(0)
     {
     }
 
     SharedMemoryRbTreeMap(const SharedMemoryRbTreeMap& other)
-        : allocator(other.allocator), node_allocator(other.allocator.get_manager()),
-          compare(other.compare), root(nullptr), free_nodes(nullptr), size_(0),
-          cached_node_count_(0), node_pool_hits_(0), node_pool_allocations_(0)
+        : allocator(other.allocator), node_allocator(other.allocator.get_manager()), node_pool(node_allocator),
+          compare(other.compare), root(nullptr), size_(0)
     {
         copy_from(other);
     }
 
     SharedMemoryRbTreeMap(SharedMemoryRbTreeMap&& other) noexcept
-        : allocator(other.allocator), node_allocator(other.allocator.get_manager()),
-          compare(std::move(other.compare)), root(other.root), free_nodes(other.free_nodes),
-          size_(other.size_), cached_node_count_(other.cached_node_count_),
-          node_pool_hits_(other.node_pool_hits_),
-          node_pool_allocations_(other.node_pool_allocations_)
+        : allocator(other.allocator), node_allocator(other.allocator.get_manager()), node_pool(std::move(other.node_pool)),
+          compare(std::move(other.compare)), root(other.root), size_(other.size_)
     {
         other.root = nullptr;
-        other.free_nodes = nullptr;
         other.size_ = 0;
-        other.cached_node_count_ = 0;
-        other.node_pool_hits_ = 0;
-        other.node_pool_allocations_ = 0;
     }
 
     SharedMemoryRbTreeMap& operator=(const SharedMemoryRbTreeMap& other)
@@ -212,19 +199,11 @@ public:
 
         if (allocator == other.allocator)
         {
-            release_cached_nodes();
+            node_pool = std::move(other.node_pool);
             root = other.root;
-            free_nodes = other.free_nodes;
             size_ = other.size_;
-            cached_node_count_ = other.cached_node_count_;
-            node_pool_hits_ = other.node_pool_hits_;
-            node_pool_allocations_ = other.node_pool_allocations_;
             other.root = nullptr;
-            other.free_nodes = nullptr;
             other.size_ = 0;
-            other.cached_node_count_ = 0;
-            other.node_pool_hits_ = 0;
-            other.node_pool_allocations_ = 0;
             return *this;
         }
 
@@ -239,7 +218,7 @@ public:
     ~SharedMemoryRbTreeMap()
     {
         clear();
-        release_cached_nodes();
+        node_pool.shrink_to_fit();
     }
 
     iterator begin() noexcept
@@ -284,17 +263,17 @@ public:
 
     size_type cached_node_count() const noexcept
     {
-        return cached_node_count_;
+        return node_pool.cached_node_count();
     }
 
     size_type node_pool_hits() const noexcept
     {
-        return node_pool_hits_;
+        return node_pool.node_pool_hits();
     }
 
     size_type node_pool_allocations() const noexcept
     {
-        return node_pool_allocations_;
+        return node_pool.node_pool_allocations();
     }
 
     allocator_type get_allocator() const noexcept
@@ -312,13 +291,10 @@ public:
         using std::swap;
         swap(allocator, other.allocator);
         swap(node_allocator, other.node_allocator);
+        swap(node_pool, other.node_pool);
         swap(compare, other.compare);
         swap(root, other.root);
-        swap(free_nodes, other.free_nodes);
         swap(size_, other.size_);
-        swap(cached_node_count_, other.cached_node_count_);
-        swap(node_pool_hits_, other.node_pool_hits_);
-        swap(node_pool_allocations_, other.node_pool_allocations_);
     }
 
     mapped_type& at(const key_type& key)
@@ -414,7 +390,7 @@ public:
 
     void shrink_to_fit()
     {
-        release_cached_nodes();
+        node_pool.shrink_to_fit();
     }
 
     iterator find(const key_type& key)
@@ -728,83 +704,12 @@ private:
     template <typename... Args>
     Node* create_node(Args&&... args)
     {
-        Node* storage = pop_cached_node();
-        bool from_cache = storage != nullptr;
-        if (storage == nullptr)
-        {
-            storage = node_allocator.allocate(1);
-            ++node_pool_allocations_;
-        }
-
-        try
-        {
-            node_allocator.construct(storage, std::forward<Args>(args)...);
-        }
-        catch (...)
-        {
-            if (from_cache)
-            {
-                push_cached_node(storage);
-            }
-            else
-            {
-                node_allocator.deallocate(storage, 1);
-                --node_pool_allocations_;
-            }
-            throw;
-        }
-        return storage;
+        return node_pool.create(std::forward<Args>(args)...);
     }
 
-    void destroy_node(Node* node)
+    void destroy_node(Node* node) noexcept
     {
-        if (!node)
-        {
-            return;
-        }
-        node_allocator.destroy(node);
-        push_cached_node(node);
-    }
-
-    Node* pop_cached_node() noexcept
-    {
-        Node* node = free_nodes.get();
-        if (node == nullptr)
-        {
-            return nullptr;
-        }
-
-        FreeNode* free_node = reinterpret_cast<FreeNode*>(node);
-        free_nodes = reinterpret_cast<Node*>(free_node->next.get());
-        --cached_node_count_;
-        ++node_pool_hits_;
-        return node;
-    }
-
-    void push_cached_node(Node* node) noexcept
-    {
-        FreeNode* free_node = reinterpret_cast<FreeNode*>(node);
-        free_node->next = reinterpret_cast<FreeNode*>(free_nodes.get());
-        free_nodes = node;
-        ++cached_node_count_;
-    }
-
-    void release_cached_nodes() noexcept
-    {
-        Node* node = free_nodes.get();
-        while (node != nullptr)
-        {
-            FreeNode* free_node = reinterpret_cast<FreeNode*>(node);
-            Node* next = reinterpret_cast<Node*>(free_node->next.get());
-            node_allocator.deallocate(node, 1);
-            if (node_pool_allocations_ > 0)
-            {
-                --node_pool_allocations_;
-            }
-            node = next;
-        }
-        free_nodes = nullptr;
-        cached_node_count_ = 0;
+        node_pool.destroy(node);
     }
 
     void rotate_left(Node* node)
@@ -1139,13 +1044,10 @@ private:
 
     allocator_type allocator;
     node_allocator_type node_allocator;
+    node_pool_type node_pool;
     key_compare compare;
     OffsetPtr<Node> root;
-    OffsetPtr<Node> free_nodes;
     size_type size_;
-    size_type cached_node_count_;
-    size_type node_pool_hits_;
-    size_type node_pool_allocations_;
 };
 
 } // namespace interprocess::detail

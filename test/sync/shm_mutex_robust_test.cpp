@@ -1,3 +1,4 @@
+#include "interprocess/error.h"
 #include "interprocess/sync/posix_mutex.h"
 #include <chrono>
 #include <iostream>
@@ -159,6 +160,48 @@ int main()
         return 1;
     }
     state->mutex.unlock();
+
+    pid = fork();
+    if (pid == -1)
+    {
+        std::cerr << "[Robust Mutex Test] second fork failed" << std::endl;
+        state->~SharedState();
+        munmap(memory, sizeof(SharedState));
+        return 1;
+    }
+    if (pid == 0)
+    {
+        state->mutex.lock();
+        state->value = 789;
+        _exit(0);
+    }
+    status = 0;
+    if (waitpid(pid, &status, 0) == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    {
+        std::cerr << "[Robust Mutex Test] second child process failed" << std::endl;
+        state->~SharedState();
+        munmap(memory, sizeof(SharedState));
+        return 1;
+    }
+    try
+    {
+        state->mutex.lock();
+        std::cerr << "[Robust Mutex Test] lock should throw owner_dead" << std::endl;
+        state->mutex.unlock();
+        state->~SharedState();
+        munmap(memory, sizeof(SharedState));
+        return 1;
+    }
+    catch (const std::system_error& e)
+    {
+        if (e.code() != make_error_code(InterprocessErrc::owner_dead))
+        {
+            std::cerr << "[Robust Mutex Test] owner_dead error code mismatch" << std::endl;
+            state->~SharedState();
+            munmap(memory, sizeof(SharedState));
+            return 1;
+        }
+    }
 
     state->~SharedState();
     munmap(memory, sizeof(SharedState));

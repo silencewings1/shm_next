@@ -2,6 +2,7 @@
 
 #include "../../allocator/offset_ptr.h"
 #include "../../allocator/shared_memory_allocator.h"
+#include "shared_memory_node_pool.h"
 #include <cmath>
 #include <cstddef>
 #include <functional>
@@ -40,15 +41,11 @@ private:
         }
     };
 
-    struct FreeNode
-    {
-        OffsetPtr<FreeNode> next;
-    };
-
     template <typename U>
     using rebind_alloc_t = typename Allocator::template rebind<U>::other;
 
     using node_allocator_type = rebind_alloc_t<Node>;
+    using node_pool_type = SharedMemoryNodePool<Node, node_allocator_type>;
     using bucket_allocator_type = rebind_alloc_t<OffsetPtr<Node>>;
 
     template <typename ValueType, typename PointerType, typename ReferenceType>
@@ -209,19 +206,17 @@ public:
         BasicLocalIterator<const value_type, const value_type*, const value_type&>;
 
     explicit SharedMemoryHashTable(const allocator_type& alloc) noexcept
-        : allocator(alloc), node_allocator(alloc.get_manager()), bucket_allocator(alloc.get_manager()),
+        : allocator(alloc), node_allocator(alloc.get_manager()), node_pool(node_allocator), bucket_allocator(alloc.get_manager()),
           hash_function_(), key_equal_(), buckets(nullptr), bucket_count_(0), size_(0),
-          max_load_factor_(1.0f), head_(nullptr), tail_(nullptr), free_nodes_(nullptr),
-          cached_node_count_(0), node_pool_hits_(0), node_pool_allocations_(0)
+          max_load_factor_(1.0f), head_(nullptr), tail_(nullptr)
     {
         initialize_buckets(default_bucket_count);
     }
 
     explicit SharedMemoryHashTable(size_type bucket_count, const allocator_type& alloc)
-        : allocator(alloc), node_allocator(alloc.get_manager()), bucket_allocator(alloc.get_manager()),
+        : allocator(alloc), node_allocator(alloc.get_manager()), node_pool(node_allocator), bucket_allocator(alloc.get_manager()),
           hash_function_(), key_equal_(), buckets(nullptr), bucket_count_(0), size_(0),
-          max_load_factor_(1.0f), head_(nullptr), tail_(nullptr), free_nodes_(nullptr),
-          cached_node_count_(0), node_pool_hits_(0), node_pool_allocations_(0)
+          max_load_factor_(1.0f), head_(nullptr), tail_(nullptr)
     {
         initialize_buckets(bucket_count);
     }
@@ -229,10 +224,9 @@ public:
     template <typename InputIt,
               typename = std::enable_if_t<!std::is_integral<InputIt>::value, int>>
     SharedMemoryHashTable(InputIt first, InputIt last, const allocator_type& alloc)
-        : allocator(alloc), node_allocator(alloc.get_manager()), bucket_allocator(alloc.get_manager()),
+        : allocator(alloc), node_allocator(alloc.get_manager()), node_pool(node_allocator), bucket_allocator(alloc.get_manager()),
           hash_function_(), key_equal_(), buckets(nullptr), bucket_count_(0), size_(0),
-          max_load_factor_(1.0f), head_(nullptr), tail_(nullptr), free_nodes_(nullptr),
-          cached_node_count_(0), node_pool_hits_(0), node_pool_allocations_(0)
+          max_load_factor_(1.0f), head_(nullptr), tail_(nullptr)
     {
         initialize_buckets(default_bucket_count);
         try
@@ -242,7 +236,7 @@ public:
         catch (...)
         {
             clear();
-            release_cached_nodes();
+            node_pool.shrink_to_fit();
             release_buckets();
             throw;
         }
@@ -250,10 +244,9 @@ public:
 
     SharedMemoryHashTable(size_type bucket_count, const hasher& hash,
                           const key_equal& equal, const allocator_type& alloc)
-        : allocator(alloc), node_allocator(alloc.get_manager()), bucket_allocator(alloc.get_manager()),
+        : allocator(alloc), node_allocator(alloc.get_manager()), node_pool(node_allocator), bucket_allocator(alloc.get_manager()),
           hash_function_(hash), key_equal_(equal), buckets(nullptr), bucket_count_(0), size_(0),
-          max_load_factor_(1.0f), head_(nullptr), tail_(nullptr), free_nodes_(nullptr),
-          cached_node_count_(0), node_pool_hits_(0), node_pool_allocations_(0)
+          max_load_factor_(1.0f), head_(nullptr), tail_(nullptr)
     {
         initialize_buckets(bucket_count);
     }
@@ -262,10 +255,9 @@ public:
               typename = std::enable_if_t<!std::is_integral<InputIt>::value, int>>
     SharedMemoryHashTable(InputIt first, InputIt last, size_type bucket_count, const hasher& hash,
                           const key_equal& equal, const allocator_type& alloc)
-        : allocator(alloc), node_allocator(alloc.get_manager()), bucket_allocator(alloc.get_manager()),
+        : allocator(alloc), node_allocator(alloc.get_manager()), node_pool(node_allocator), bucket_allocator(alloc.get_manager()),
           hash_function_(hash), key_equal_(equal), buckets(nullptr), bucket_count_(0), size_(0),
-          max_load_factor_(1.0f), head_(nullptr), tail_(nullptr), free_nodes_(nullptr),
-          cached_node_count_(0), node_pool_hits_(0), node_pool_allocations_(0)
+          max_load_factor_(1.0f), head_(nullptr), tail_(nullptr)
     {
         initialize_buckets(bucket_count);
         try
@@ -275,7 +267,7 @@ public:
         catch (...)
         {
             clear();
-            release_cached_nodes();
+            node_pool.shrink_to_fit();
             release_buckets();
             throw;
         }
@@ -294,12 +286,10 @@ public:
     }
 
     SharedMemoryHashTable(const SharedMemoryHashTable& other)
-        : allocator(other.allocator), node_allocator(other.allocator.get_manager()),
+        : allocator(other.allocator), node_allocator(other.allocator.get_manager()), node_pool(node_allocator),
           bucket_allocator(other.allocator.get_manager()), hash_function_(other.hash_function_),
           key_equal_(other.key_equal_), buckets(nullptr), bucket_count_(0), size_(0),
-          max_load_factor_(other.max_load_factor_), head_(nullptr), tail_(nullptr),
-          free_nodes_(nullptr), cached_node_count_(0), node_pool_hits_(0),
-          node_pool_allocations_(0)
+          max_load_factor_(other.max_load_factor_), head_(nullptr), tail_(nullptr)
     {
         initialize_buckets(other.bucket_count_);
         try
@@ -319,23 +309,18 @@ public:
 
     SharedMemoryHashTable(SharedMemoryHashTable&& other) noexcept
         : allocator(other.allocator), node_allocator(other.allocator.get_manager()),
-          bucket_allocator(other.allocator.get_manager()), hash_function_(std::move(other.hash_function_)),
+          node_pool(std::move(other.node_pool)), bucket_allocator(other.allocator.get_manager()),
+          hash_function_(std::move(other.hash_function_)),
           key_equal_(std::move(other.key_equal_)), buckets(other.buckets),
           bucket_count_(other.bucket_count_), size_(other.size_),
-          max_load_factor_(other.max_load_factor_), head_(other.head_), tail_(other.tail_),
-          free_nodes_(other.free_nodes_), cached_node_count_(other.cached_node_count_),
-          node_pool_hits_(other.node_pool_hits_),
-          node_pool_allocations_(other.node_pool_allocations_)
+          max_load_factor_(other.max_load_factor_), head_(other.head_), tail_(other.tail_)
     {
         other.buckets = nullptr;
         other.bucket_count_ = 0;
         other.size_ = 0;
         other.head_ = nullptr;
         other.tail_ = nullptr;
-        other.free_nodes_ = nullptr;
-        other.cached_node_count_ = 0;
-        other.node_pool_hits_ = 0;
-        other.node_pool_allocations_ = 0;
+
     }
 
     SharedMemoryHashTable& operator=(const SharedMemoryHashTable& other)
@@ -358,7 +343,7 @@ public:
         }
 
         clear();
-        release_cached_nodes();
+        node_pool.shrink_to_fit();
         release_buckets();
 
         allocator = other.allocator;
@@ -372,27 +357,21 @@ public:
         max_load_factor_ = other.max_load_factor_;
         head_ = other.head_;
         tail_ = other.tail_;
-        free_nodes_ = other.free_nodes_;
-        cached_node_count_ = other.cached_node_count_;
-        node_pool_hits_ = other.node_pool_hits_;
-        node_pool_allocations_ = other.node_pool_allocations_;
+        node_pool = std::move(other.node_pool);
 
         other.buckets = nullptr;
         other.bucket_count_ = 0;
         other.size_ = 0;
         other.head_ = nullptr;
         other.tail_ = nullptr;
-        other.free_nodes_ = nullptr;
-        other.cached_node_count_ = 0;
-        other.node_pool_hits_ = 0;
-        other.node_pool_allocations_ = 0;
+
         return *this;
     }
 
     ~SharedMemoryHashTable()
     {
         clear();
-        release_cached_nodes();
+        node_pool.shrink_to_fit();
         release_buckets();
     }
 
@@ -735,6 +714,11 @@ public:
         }
     }
 
+    void shrink_to_fit() noexcept
+    {
+        node_pool.shrink_to_fit();
+    }
+
     void rehash(size_type new_bucket_count)
     {
         new_bucket_count = normalize_bucket_count(new_bucket_count);
@@ -771,6 +755,7 @@ public:
         using std::swap;
         swap(allocator, other.allocator);
         swap(node_allocator, other.node_allocator);
+        swap(node_pool, other.node_pool);
         swap(bucket_allocator, other.bucket_allocator);
         swap(hash_function_, other.hash_function_);
         swap(key_equal_, other.key_equal_);
@@ -780,25 +765,21 @@ public:
         swap(max_load_factor_, other.max_load_factor_);
         swap(head_, other.head_);
         swap(tail_, other.tail_);
-        swap(free_nodes_, other.free_nodes_);
-        swap(cached_node_count_, other.cached_node_count_);
-        swap(node_pool_hits_, other.node_pool_hits_);
-        swap(node_pool_allocations_, other.node_pool_allocations_);
     }
 
     size_type cached_node_count() const noexcept
     {
-        return cached_node_count_;
+        return node_pool.cached_node_count();
     }
 
     size_type node_pool_hits() const noexcept
     {
-        return node_pool_hits_;
+        return node_pool.node_pool_hits();
     }
 
     size_type node_pool_allocations() const noexcept
     {
-        return node_pool_allocations_;
+        return node_pool.node_pool_allocations();
     }
 
 private:
@@ -937,79 +918,12 @@ private:
     template <typename... Args>
     Node* create_node(Args&&... args)
     {
-        Node* storage = pop_cached_node();
-        const bool from_cache = storage != nullptr;
-        if (!storage)
-        {
-            storage = node_allocator.allocate(1);
-            ++node_pool_allocations_;
-        }
-
-        try
-        {
-            node_allocator.construct(storage, std::forward<Args>(args)...);
-        }
-        catch (...)
-        {
-            if (from_cache)
-            {
-                push_cached_node(storage);
-            }
-            else
-            {
-                node_allocator.deallocate(storage, 1);
-                --node_pool_allocations_;
-            }
-            throw;
-        }
-        return storage;
+        return node_pool.create(std::forward<Args>(args)...);
     }
 
     void destroy_node(Node* node) noexcept
     {
-        node_allocator.destroy(node);
-        push_cached_node(node);
-    }
-
-    Node* pop_cached_node() noexcept
-    {
-        Node* node = free_nodes_.get();
-        if (node == nullptr)
-        {
-            return nullptr;
-        }
-
-        FreeNode* free_node = reinterpret_cast<FreeNode*>(node);
-        free_nodes_ = reinterpret_cast<Node*>(free_node->next.get());
-        --cached_node_count_;
-        ++node_pool_hits_;
-        return node;
-    }
-
-    void push_cached_node(Node* node) noexcept
-    {
-        FreeNode* free_node = reinterpret_cast<FreeNode*>(node);
-        free_node->next = reinterpret_cast<FreeNode*>(free_nodes_.get());
-        free_nodes_ = node;
-        ++cached_node_count_;
-    }
-
-    void release_cached_nodes() noexcept
-    {
-        Node* node = free_nodes_.get();
-        while (node != nullptr)
-        {
-            FreeNode* free_node = reinterpret_cast<FreeNode*>(node);
-            Node* next = reinterpret_cast<Node*>(free_node->next.get());
-            node_allocator.deallocate(node, 1);
-            if (node_pool_allocations_ > 0)
-            {
-                --node_pool_allocations_;
-            }
-            node = next;
-        }
-        free_nodes_ = nullptr;
-        cached_node_count_ = 0;
+        node_pool.destroy(node);
     }
 
     void link_new_node(Node* node)
@@ -1109,6 +1023,7 @@ private:
 
     allocator_type allocator;
     node_allocator_type node_allocator;
+    node_pool_type node_pool;
     bucket_allocator_type bucket_allocator;
     hasher hash_function_;
     key_equal key_equal_;
@@ -1118,10 +1033,6 @@ private:
     float max_load_factor_;
     OffsetPtr<Node> head_;
     OffsetPtr<Node> tail_;
-    OffsetPtr<Node> free_nodes_;
-    size_type cached_node_count_;
-    size_type node_pool_hits_;
-    size_type node_pool_allocations_;
 };
 
 } // namespace interprocess::detail

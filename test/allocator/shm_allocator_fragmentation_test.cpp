@@ -43,6 +43,15 @@ int main()
             blocks.push_back(manager->allocate(size, alignof(std::max_align_t)));
         }
 
+        SharedMemoryAllocatorStats stats_after_alloc = manager->get_stats();
+        if (!require(stats_after_alloc.sane && stats_after_alloc.allocated_block_count >= blocks.size() &&
+                         stats_after_alloc.free_block_count >= 1 &&
+                         stats_after_alloc.allocated_block_bytes > 0,
+                     "allocator stats should scan allocated and free blocks"))
+        {
+            ManagedSharedMemory::remove(shm_name.c_str());
+            return 1;
+        }
         if (!require(manager->check_sanity(), "sanity failed after initial allocations"))
         {
             ManagedSharedMemory::remove(shm_name.c_str());
@@ -111,6 +120,15 @@ int main()
         }
         if (!require(manager->all_memory_deallocated(),
                      "all direct allocations should be returned"))
+        {
+            ManagedSharedMemory::remove(shm_name.c_str());
+            return 1;
+        }
+        SharedMemoryAllocatorStats stats_after_cleanup = manager->get_stats();
+        if (!require(stats_after_cleanup.sane && stats_after_cleanup.allocated_block_count == 0 &&
+                         stats_after_cleanup.free_block_count == 1 &&
+                         stats_after_cleanup.free_payload_bytes == manager->get_free_memory(),
+                     "allocator stats should reflect fully coalesced free memory"))
         {
             ManagedSharedMemory::remove(shm_name.c_str());
             return 1;

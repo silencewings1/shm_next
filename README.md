@@ -16,10 +16,12 @@
 
 - POSIX shared memory RAII 封装：`shm_open`、`ftruncate`、`mmap`、`munmap`、`shm_unlink`。
 - 管理型共享内存入口：`ManagedSharedMemory` 支持 `create_only`、`open_only`、`open_or_create`、`open_read_only`。
+- 统一错误体系：`InterprocessError` + `InterprocessErrc`，核心 attach/layout/allocator/只读违规路径可按稳定错误码处理；robust mutex owner-dead 使用 `InterprocessErrc::owner_dead`。
+- 诊断快照：`SharedMemoryAllocatorStats` 同时提供 allocator 扫描型统计和段内累计计数（allocate/deallocate/失败/split/merge/try_expand）。
 - 段内分配器：`SharedMemoryManager` + `SharedMemoryAllocator<T>`。
 - 命名对象：`construct`、`find`、`find_or_construct`、数组构造、`destroy`、`destroy_ptr`。
 - 共享内存容器：`SharedMemoryString`、`SharedMemoryVector<T>`、`SharedMemoryList<T>`、`SharedMemoryMap<K,V>`、`SharedMemoryHashMap<K,V>`。
-- 跨进程同步：mutex、condition、semaphore，mutex 在支持的平台启用 robust owner-dead 语义。
+- 跨进程同步：mutex、shared mutex、condition、semaphore，mutex 在支持的平台启用 robust owner-dead 语义。
 - 稳健性检查：allocator sanity、double-free 检测、非法指针检测、初始化状态机、崩溃构造清理。
 - 性能辅助：`allocate_many`、`deallocate_many`、`try_expand`、vector/string 原地扩容、map node cache。
 - CTest 覆盖：按模块分类的容器接口、多进程加锁、嵌套容器、allocator、IPC、同步原语、benchmark、性能对比和 producer/consumer 集成场景。
@@ -28,6 +30,8 @@
 
 ```text
 interprocess/
+  error.h
+  diagnostics.h
   allocator/
     offset_ptr.h
     shared_memory_allocator.h
@@ -49,6 +53,7 @@ interprocess/
     posix_shared_memory_object.h
   sync/
     posix_mutex.h
+    posix_shared_mutex.h
     posix_condition.h
     posix_semaphore.h
 test/
@@ -588,11 +593,11 @@ test/CMakeLists.txt
   - `shm_list_perf_compare.cpp`
   - `shm_benchmark.cpp`
 - `test/allocator/`
-  - allocator 基础、碎片化、manager 生命周期、offset_ptr
+  - allocator 基础、碎片化、manager 生命周期、offset_ptr、diagnostics stats
 - `test/ipc/`
-  - open/create、只读快照、崩溃恢复、shared memory object、mapped region
+  - open/create、layout version、统一错误体系、只读快照、崩溃恢复、shared memory object、mapped region
 - `test/sync/`
-  - mutex、condition、semaphore
+  - mutex、shared mutex、condition、semaphore
 
 只运行某类测试：
 
@@ -604,6 +609,7 @@ ctest --test-dir build -L ipc --output-on-failure
 ctest --test-dir build -L sync --output-on-failure
 ctest --test-dir build -L benchmark --output-on-failure
 ctest --test-dir build -L compare --output-on-failure
+ctest --test-dir build -L p0 --output-on-failure
 ```
 
 只运行 producer/consumer 集成场景：

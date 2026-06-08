@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../error.h"
 #include <chrono>
 #include <errno.h>
 #include <pthread.h>
@@ -32,7 +33,8 @@ class MutexOwnerDeadError : public std::system_error
 {
 public:
     MutexOwnerDeadError()
-        : std::system_error(EOWNERDEAD, std::system_category(), "Interprocess mutex owner died")
+        : std::system_error(make_error_code(InterprocessErrc::owner_dead),
+                            "Interprocess mutex owner died")
     {
     }
 };

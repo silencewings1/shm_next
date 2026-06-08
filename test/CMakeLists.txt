@@ -23,6 +23,9 @@ function(shm_add_test_labels test_name source_path)
     if(source_path MATCHES "/test/container/")
         list(APPEND labels "container")
     endif()
+    if(source_path MATCHES "/test/container/node_pool/")
+        list(APPEND labels "node_pool" "p0")
+    endif()
     if(source_path MATCHES "/test/container/nested/")
         list(APPEND labels "nested")
     endif()
@@ -35,11 +38,23 @@ function(shm_add_test_labels test_name source_path)
     if(source_path MATCHES "/test/allocator/")
         list(APPEND labels "allocator")
     endif()
+    if(source_path MATCHES "shm_diagnostics_stats_test[.]cpp$")
+        list(APPEND labels "diagnostics" "p0")
+    endif()
     if(source_path MATCHES "/test/ipc/")
         list(APPEND labels "ipc")
     endif()
+    if(source_path MATCHES "shm_layout_version_test[.]cpp$")
+        list(APPEND labels "layout" "p0")
+    endif()
+    if(source_path MATCHES "shm_error_system_test[.]cpp$")
+        list(APPEND labels "error" "p0")
+    endif()
     if(source_path MATCHES "/test/sync/")
         list(APPEND labels "sync")
+    endif()
+    if(source_path MATCHES "shm_shared_mutex_test[.]cpp$")
+        list(APPEND labels "shared_mutex" "p0")
     endif()
 
     if(labels)
@@ -216,7 +231,19 @@ shm_register_test_by_path(
     30
 )
 shm_register_test_by_path(
+    "test/allocator/shm_diagnostics_stats_test.cpp"
+    30
+)
+shm_register_test_by_path(
     "test/ipc/shm_open_or_create_test.cpp"
+    30
+)
+shm_register_test_by_path(
+    "test/ipc/shm_layout_version_test.cpp"
+    30
+)
+shm_register_test_by_path(
+    "test/ipc/shm_error_system_test.cpp"
     30
 )
 shm_register_test_by_path(
@@ -240,11 +267,19 @@ shm_register_test_by_path(
     30
 )
 shm_register_test_by_path(
+    "test/sync/shm_shared_mutex_test.cpp"
+    30
+)
+shm_register_test_by_path(
     "test/sync/shm_semaphore_test.cpp"
     30
 )
 shm_register_test_by_path(
     "test/sync/shm_condition_test.cpp"
+    30
+)
+shm_register_test_by_path(
+    "test/container/node_pool/shm_node_pool_test.cpp"
     30
 )
 

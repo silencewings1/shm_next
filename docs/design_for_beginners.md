@@ -13,6 +13,7 @@
 - 用名字管理共享对象，例如 `"RootObject"`。
 - 使用共享内存友好的字符串、vector、list、map、hash_map。
 - 使用跨进程 mutex、condition、semaphore 做同步。
+- 使用统一错误码和 allocator 诊断快照定位 attach、layout、allocator、只读违规、owner-dead 等问题。
 - 支持只读映射，适合快照式读取。
 - 支持 robust mutex owner-dead 检测、初始化状态机、崩溃构造清理等稳健性机制。
 
@@ -48,6 +49,8 @@ flowchart TD
     Managed --> ShmObj["SharedMemoryObject"]
     Managed --> Region["MappedRegion"]
     Managed --> Manager["SharedMemoryManager"]
+    Managed --> Error["InterprocessError"]
+    Managed --> Diagnostics["SharedMemoryAllocatorStats"]
 
     Manager --> BlockAlloc["SharedMemoryBlockAllocator"]
     Manager --> Registry["NamedObjectRegistry"]
@@ -68,6 +71,7 @@ flowchart TD
 
     Condition["InterprocessCondition"] --> ManagerMutex
     Semaphore["InterprocessSemaphore"] --> Condition
+    SharedMutex["InterprocessSharedMutex"] --> App
 ```
 
 核心分层如下：
@@ -75,12 +79,14 @@ flowchart TD
 | 层级 | 主要文件 | 职责 |
 | --- | --- | --- |
 | IPC 封装 | `interprocess/ipc/*.h` | 封装 `shm_open`、`ftruncate`、`mmap`、`munmap`、打开模式 |
+| 错误体系 | `interprocess/error.h` | 统一错误码、错误分类和 `InterprocessError` |
+| 诊断快照 | `interprocess/diagnostics.h` | allocator 扫描型统计快照 + 累计计数 |
 | 段管理 | `interprocess/allocator/shared_memory_manager.h` | 初始化、attach、命名对象、元数据锁、读写一致性 |
 | 分配器 | `interprocess/allocator/detail/shared_memory_block_allocator.h` | 在共享内存段内部分配和释放字节块 |
 | STL allocator 适配 | `interprocess/allocator/shared_memory_allocator.h` | 给容器提供 `allocate` / `deallocate` / `construct` |
 | 指针模型 | `interprocess/allocator/offset_ptr.h` | 用相对偏移表示共享内存内的指针 |
 | 容器 | `interprocess/container/*.h` | shared-memory-aware string/vector/list/map/hash_map |
-| 同步 | `interprocess/sync/*.h` | 跨进程 mutex、condition、semaphore |
+| 同步 | `interprocess/sync/*.h` | 跨进程 mutex、shared mutex、condition、semaphore |
 | 测试和样例 | `test/**` | 按 container/allocator/ipc/sync 分类的功能、跨进程、benchmark、compare 测试 |
 
 ## 4. 推荐学习路线
@@ -594,12 +600,16 @@ test/
 | `test/ipc/shm_open_or_create_test.cpp` | 创建、打开、重复打开语义 |
 | `test/allocator/shm_manager_lifecycle_test.cpp` | 命名对象、数组、异常回滚、类型校验、只读访问、grow/shrink |
 | `test/allocator/shm_allocator_fragmentation_test.cpp` | allocator 碎片、批量分配、原地扩容、sanity |
+| `test/allocator/shm_diagnostics_stats_test.cpp` | allocator stats、累计计数、碎片统计、只读诊断快照 |
 | `test/allocator/shm_offset_ptr_test.cpp` | `OffsetPtr` 偏移语义、空指针、跨对象转换 |
+| `test/ipc/shm_layout_version_test.cpp` | manager layout version、magic/header 校验、只读 attach 校验 |
+| `test/ipc/shm_error_system_test.cpp` | `InterprocessError`、稳定错误码、只读违规、类型不匹配、invalid pointer/double-free |
 | `test/ipc/shm_crash_recovery_complex_test.cpp` | robust mutex owner-dead 和业务恢复 |
 | `test/ipc/shm_read_only_snapshot_test.cpp` | 只读映射、只读 API、类型校验 |
 | `test/ipc/shm_shared_memory_object_test.cpp` | POSIX shm 对象尺寸、unlink、基础文件语义 |
 | `test/ipc/shm_mapped_region_test.cpp` | `mmap`/`munmap`/flush 与只读只写映射边界 |
 | `test/sync/shm_mutex_robust_test.cpp` | robust mutex 行为 |
+| `test/sync/shm_shared_mutex_test.cpp` | 跨进程读写锁、shared/exclusive/timed 语义 |
 | `test/sync/shm_condition_test.cpp` | condition wait/notify、超时与跨进程配合 |
 | `test/sync/shm_semaphore_test.cpp` | semaphore 和 condition 基础同步 |
 | `test/container/string/shm_string_test.cpp` | string 接口、扩容、跨进程读写 |
@@ -610,6 +620,7 @@ test/
 | `test/container/nested/nested_*_test.cpp` | 各容器两两嵌套、跨进程打开校验、外层锁冲突场景 |
 | `test/container/nested/nested_container_matrix_test.cpp` | 批量矩阵式验证嵌套组合可构造、可读回、可销毁 |
 | `test/container/nested/shm_concurrent_process_stress_test.cpp` | 多进程共享容器和业务锁压力测试 |
+| `test/container/node_pool/shm_node_pool_test.cpp` | list/map/hash_map 节点缓存、复用和释放 |
 | `string_producer_consumer` | string producer/consumer 集成流程 |
 | `vector_producer_consumer` | 带业务锁的 vector producer/consumer 集成流程 |
 | `list_producer_consumer` | list producer/consumer 集成流程 |
@@ -622,6 +633,7 @@ benchmark / compare 程序当前也已注册进 CTest，并通过 label 做分�
 - `compare`：`test/container/compare/*.cpp`
 - `container` / `nested` / `allocator` / `ipc` / `sync`
 - `producer;consumer;integration`
+- `p0`：layout/error/diagnostics/node_pool/shared_mutex P0 能力
 
 运行全部 CTest：
 
