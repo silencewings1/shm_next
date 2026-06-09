@@ -654,6 +654,30 @@ producer/consumer 集成场景覆盖：
 
 这些程序会输出容器常用接口或跨组件对比的耗时指标，用于趋势观察和回归对比，不作为严格稳定性能基准。
 
+
+## Large data manual stress
+
+`shm_next` 提供一个手动大数据验证工具，用于验证 1GiB / 10GiB 级共享内存段的创建、raw allocator 大块 payload 分配、分块写入、跨进程读取、checksum 校验、sanity 检查和资源释放。该工具会编译为普通测试可执行文件，但默认不注册进 CTest，避免日常测试或 CI 自动占用大量空间。
+
+推荐先跑 1GiB，确认平台允许 POSIX shm 大映射后再跑 10GiB：
+
+```sh
+cmake --build build -j4
+./build/test/test_ipc_shm_large_data_stress_test --size 1G --chunk 64M --readers 2
+./build/test/test_ipc_shm_large_data_stress_test --size 10G --chunk 128M --readers 2
+```
+
+工具默认失败也会尽力 `ManagedSharedMemory::remove(name)` 释放 shm 名称；只有显式传入 `--keep-on-failure` 时才保留现场。运行前后会输出 `df -h` 和 `/dev/shm`（如存在）信息，便于确认空间释放。
+
+如需手动注册到 CTest，可配置：
+
+```sh
+cmake -S . -B build-large -DSHM_NEXT_REGISTER_LARGE_STRESS_TESTS=ON
+ctest --test-dir build-large -L "manual|large|stress" --output-on-failure
+```
+
+注意：macOS/Linux 的 POSIX shm 后端、可用磁盘、地址空间和系统策略都可能影响 10GiB 映射是否成功。该工具优先验证 raw allocator 大块 payload，不使用 `SharedMemoryVector<uint8_t>` 存 10GiB，避免逐元素构造带来的额外成本。
+
 ## 使用约束
 
 - 放进共享内存的对象不能持有进程私有资源指针。

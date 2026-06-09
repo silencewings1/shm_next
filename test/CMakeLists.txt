@@ -1,3 +1,5 @@
+option(SHM_NEXT_REGISTER_LARGE_STRESS_TESTS "Register manual large stress tests in CTest" OFF)
+
 file(GLOB_RECURSE TEST_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
@@ -43,6 +45,9 @@ function(shm_add_test_labels test_name source_path)
     endif()
     if(source_path MATCHES "/test/ipc/")
         list(APPEND labels "ipc")
+    endif()
+    if(source_path MATCHES "shm_large_data_stress_test[.]cpp$")
+        list(APPEND labels "manual" "large" "stress")
     endif()
     if(source_path MATCHES "shm_layout_version_test[.]cpp$")
         list(APPEND labels "layout" "p0")
@@ -287,6 +292,12 @@ shm_register_test_by_path(
     "test/ipc/shm_mapped_region_test.cpp"
     30
 )
+if(SHM_NEXT_REGISTER_LARGE_STRESS_TESTS)
+    shm_register_test_by_path(
+        "test/ipc/shm_large_data_stress_test.cpp"
+        3600
+    )
+endif()
 shm_register_test_by_path(
     "test/sync/shm_mutex_robust_test.cpp"
     30
