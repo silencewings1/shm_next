@@ -1,7 +1,3 @@
-file(GLOB_RECURSE INTERPROCESS_HEADERS CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
-)
-
 add_library(shm_next_interprocess STATIC
     interprocess.cpp
 )
@@ -10,18 +6,12 @@ add_library(shm_next::interprocess ALIAS shm_next_interprocess)
 
 set_target_properties(shm_next_interprocess PROPERTIES
     EXPORT_NAME interprocess
+    POSITION_INDEPENDENT_CODE ON
 )
 
 target_compile_features(shm_next_interprocess
     PUBLIC
         cxx_std_17
-)
-
-target_sources(shm_next_interprocess
-    PUBLIC
-        FILE_SET HEADERS
-        BASE_DIRS "${PROJECT_SOURCE_DIR}"
-        FILES ${INTERPROCESS_HEADERS}
 )
 
 target_include_directories(shm_next_interprocess
@@ -54,5 +44,9 @@ install(TARGETS shm_next_interprocess
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
-    FILE_SET HEADERS DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+)
+
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/interprocess"
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+    FILES_MATCHING PATTERN "*.h"
 )

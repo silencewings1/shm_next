@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.10)
 
 project(shm_next VERSION 0.1.0 LANGUAGES CXX)
 
@@ -34,6 +34,8 @@ option(SHM_NEXT_ENABLE_MANAGER_SHARED_MUTEX
 )
 message(STATUS "Manager shared mutex: ${SHM_NEXT_ENABLE_MANAGER_SHARED_MUTEX}")
 
+option(SHM_NEXT_BUILD_TESTS "Build and register shm_next tests" ON)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -42,16 +44,27 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 find_package(Threads REQUIRED)
-find_program(BASH_EXECUTABLE bash REQUIRED)
-
-enable_testing()
 
 add_subdirectory(interprocess)
-add_subdirectory(test)
+
+if(SHM_NEXT_BUILD_TESTS)
+    find_program(BASH_EXECUTABLE bash)
+    if(NOT BASH_EXECUTABLE)
+        message(FATAL_ERROR "bash is required to run shm_next integration tests")
+    endif()
+    enable_testing()
+    add_subdirectory(test)
+endif()
 
 install(EXPORT shm_nextTargets
     NAMESPACE shm_next::
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/shm_next"
+)
+
+# Make the build tree consumable through find_package(shm_next CONFIG).
+export(EXPORT shm_nextTargets
+    NAMESPACE shm_next::
+    FILE "${CMAKE_CURRENT_BINARY_DIR}/shm_nextTargets.cmake"
 )
 
 configure_package_config_file(
