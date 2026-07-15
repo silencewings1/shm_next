@@ -563,8 +563,9 @@ macOS 上常见限制是 POSIX shm 创建后无法可靠二次调整大小，测
 构建：
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j 8
+mkdir -p build
+(cd build && cmake .. -DCMAKE_BUILD_TYPE=Release)
+cmake --build build -- -j8
 ```
 
 `CMAKE_BUILD_TYPE` 支持 `Release` 和 `Debug`，未指定时默认为 `Release`。
@@ -572,7 +573,7 @@ cmake --build build -j 8
 运行全部 CTest：
 
 ```sh
-ctest --test-dir build --output-on-failure
+(cd build && ctest --output-on-failure)
 ```
 
 当前测试目录与 CMake 组织方式：
@@ -617,20 +618,20 @@ test/CMakeLists.txt
 只运行某类测试：
 
 ```sh
-ctest --test-dir build -L container --output-on-failure
-ctest --test-dir build -L nested --output-on-failure
-ctest --test-dir build -L allocator --output-on-failure
-ctest --test-dir build -L ipc --output-on-failure
-ctest --test-dir build -L sync --output-on-failure
-ctest --test-dir build -L benchmark --output-on-failure
-ctest --test-dir build -L compare --output-on-failure
-ctest --test-dir build -L p0 --output-on-failure
+(cd build && ctest -L container --output-on-failure)
+(cd build && ctest -L nested --output-on-failure)
+(cd build && ctest -L allocator --output-on-failure)
+(cd build && ctest -L ipc --output-on-failure)
+(cd build && ctest -L sync --output-on-failure)
+(cd build && ctest -L benchmark --output-on-failure)
+(cd build && ctest -L compare --output-on-failure)
+(cd build && ctest -L p0 --output-on-failure)
 ```
 
 只运行 producer/consumer 集成场景：
 
 ```sh
-ctest --test-dir build -L producer --output-on-failure
+(cd build && ctest -L producer --output-on-failure)
 ```
 
 producer/consumer 集成场景覆盖：
@@ -662,7 +663,7 @@ producer/consumer 集成场景覆盖：
 推荐先跑 1GiB，确认平台允许 POSIX shm 大映射后再跑 10GiB：
 
 ```sh
-cmake --build build -j4
+cmake --build build -- -j4
 ./build/test/test_ipc_shm_large_data_stress_test --size 1G --chunk 64M --readers 2
 ./build/test/test_ipc_shm_large_data_stress_test --size 10G --chunk 128M --readers 2
 ```
@@ -672,8 +673,9 @@ cmake --build build -j4
 如需手动注册到 CTest，可配置：
 
 ```sh
-cmake -S . -B build-large -DSHM_NEXT_REGISTER_LARGE_STRESS_TESTS=ON
-ctest --test-dir build-large -L "manual|large|stress" --output-on-failure
+mkdir -p build-large
+(cd build-large && cmake .. -DSHM_NEXT_REGISTER_LARGE_STRESS_TESTS=ON)
+(cd build-large && ctest -L "manual|large|stress" --output-on-failure)
 ```
 
 注意：macOS/Linux 的 POSIX shm 后端、可用磁盘、地址空间和系统策略都可能影响 10GiB 映射是否成功。该工具优先验证 raw allocator 大块 payload，不使用 `SharedMemoryVector<uint8_t>` 存 10GiB，避免逐元素构造带来的额外成本。
@@ -712,10 +714,19 @@ ctest --test-dir build-large -L "manual|large|stress" --output-on-failure
 
 ## 安装与 CMake 集成
 
+仅构建库、不构建测试：
+
+```sh
+mkdir -p build
+(cd build && cmake .. -DSHM_NEXT_BUILD_TESTS=OFF)
+cmake --build build -- -j4
+```
+
 安装：
 
 ```sh
-cmake --install build --prefix /your/install/prefix
+(cd build && cmake .. -DCMAKE_INSTALL_PREFIX=/your/install/prefix)
+cmake --build build --target install
 ```
 
 下游项目：
@@ -724,6 +735,10 @@ cmake --install build --prefix /your/install/prefix
 find_package(shm_next REQUIRED CONFIG)
 target_link_libraries(your_target PRIVATE shm_next::interprocess)
 ```
+
+构建目录也会生成可用的 `shm_nextConfig.cmake` 和
+`shm_nextTargets.cmake`，下游可将该构建目录加入 `CMAKE_PREFIX_PATH`
+直接使用，无需先安装。
 
 ## 当前定位
 
